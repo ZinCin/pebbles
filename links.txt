@@ -1,0 +1,3 @@
+telegram=https://t.me/artif_life/
+discord=https://discord.gg/6Y7jFNVeFJ/
+github=https://github.com/ZinCin/pebbles/
