@@ -8851,7 +8851,7 @@ async function exportEverything() {
   toast(s.exportAllDone(files.length));
 }
 
-const LIB_EMBED = {"links": "# Ссылки на сообщества: строки вида имя=адрес. Замените адреса на свои.\ntelegram=https://telegram.org/\ndiscord=https://discord.com/\ngithub=https://github.com/\n", "items": {"ring-lights.json": {"type": "world", "name": {"ru": "Бегущие огни", "en": "Chasing lights"}, "desc": {"ru": "Три камня бегут по кольцу из проводников и дисплеев. Кнопка внутри бросает камень вперёд.", "en": "Three pebbles run around a ring of wires and displays. The button inside throws a pebble forward."}, "author": "Pebble Automaton", "date": "2026-11-22", "tags": ["demo"], "code": "dAOKxSaGVyvJDUicvZTRjhggqlHSAYQadLozwSLQbBvfYLOYzprQVSZQSwSNLOgvxcXDMDPdoveHXSGXEDsEsSzpyUyZzdYcNFnBeKvmmpAvkHuijYMmMCwsDDQIqAihFRtHYfZMLgYdrAEfiZTaPbuWHGfSVZMMxVcbxgFGqWLEXBHrblPalBEdAAAKAkOEKMylldwcsiSNVxNSULZmYeNkGXnUqW"}, "tripler.json": {"type": "plan", "name": {"ru": "Утроитель", "en": "Tripler"}, "desc": {"ru": "Дубликатор разводит поток на три ветви, которые снова сходятся в одной клетке: каждый камень, кроме одного, превращается в три.", "en": "A Duplicator splits the stream into three branches that meet again in one cell: every pebble but one becomes three."}, "author": "Pebble Automaton", "date": "2026-11-22", "tags": ["demo", "duplicator"], "code": "OAKLqhhiQxmeuiAlRRMcmCzTCGihuMETvcdJsjSleSfPMDEsIrwCrJRTEYrdsOqvYw"}}};
+const LIB_EMBED = {"links": "", "items": {}};
 
 
 const LIB_DIR = 'library/', LINKS_FILE = 'links.txt';
@@ -8897,27 +8897,34 @@ const libText = o => (o && typeof o === 'object') ? (o[Cfg.lang] || o.en || o.ru
 
 async function libNames() {
   const names = new Set();
-  try { const t = await fetchText(LIB_DIR + 'index.json'); if (t) for (const n of JSON.parse(t)) names.add(n); } catch (e) {  }
+  let reached = false;
+  try { const t = await fetchText(LIB_DIR + 'index.json'); if (t) { reached = true; for (const n of JSON.parse(t)) names.add(n); } } catch (e) {}
+  try {
+    const t = await fetchText(LIB_DIR);
+    if (t && /<a\s|<ul|Directory listing|Index of/i.test(t)) {
+      reached = true;
+      for (const m of t.matchAll(/href="([^"?#]+\.json)"/gi)) { const n = decodeURIComponent(m[1]).split('/').pop(); if (n !== 'index.json') names.add(n); }
+    }
+  } catch (e) {}
   const host = location.hostname;
   if (host.endsWith('.github.io')) {
     const owner = host.split('.')[0], seg = location.pathname.split('/')[1] || '', repo = seg && !seg.includes('.') ? seg : owner + '.github.io';
-    for (const base of ['', 'docs/']) {
+    for (const base of ['', 'docs/', 'site/']) {
       try {
         const r = await fetch('https://api.github.com/repos/' + owner + '/' + repo + '/contents/' + base + 'library');
-        if (r.ok) { for (const f of await r.json()) if (/\.json$/i.test(f.name) && f.name !== 'index.json') names.add(f.name); break; }
-      } catch (e) {  }
+        if (r.ok) { reached = true; for (const f of await r.json()) if (/\.json$/i.test(f.name) && f.name !== 'index.json') names.add(f.name); break; }
+      } catch (e) {}
     }
   }
-  return [...names];
+  return { names: [...names], reached };
 }
 async function libLoad() {
   if (LIB.items) return;
-  const names = await libNames(), items = [];
+  const { names, reached } = await libNames(), items = [];
   const raw = await Promise.all(names.map(async n => {
     try { const t = await fetchText(LIB_DIR + n); return [n, t ? JSON.parse(t) : null]; } catch (e) { return [n, null]; }
   }));
-  const found = raw.filter(x => x[1]);
-  const src = found.length ? found : Object.entries(LIB_EMBED.items);
+  const src = reached ? raw.filter(x => x[1]) : Object.entries(LIB_EMBED.items);
   for (const [n, o] of src) {
     if (!o || !o.code || (o.type !== 'world' && o.type !== 'plan')) continue;
     const it = { ...o, id: n.replace(/\.json$/i, ''), ts: Date.parse(o.date) || 0 };
