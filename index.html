@@ -6809,8 +6809,9 @@ function drawBackgroundStyle(ctx, style, ox, oy, x0, x1, y0, y1, W, H, z) {
     lines(8, C.grid2);
   } else if (style === 'checker') {
     if (z < 6) return;
-    ctx.fillStyle = C.alt;
-    for (let y = y0; y <= y1; y++) for (let x = x0 + (((x0 + y) & 1) ? 0 : 1); x <= x1; x += 2) ctx.fillRect(Math.round(ox + x * z), Math.round(oy + y * z), Math.ceil(z), Math.ceil(z));
+    ctx.fillStyle = C.alt; ctx.beginPath(); const q = Math.ceil(z);
+    for (let y = y0; y <= y1; y++) { const py = Math.round(oy + y * z); for (let x = x0 + (((x0 + y) & 1) ? 0 : 1); x <= x1; x += 2) ctx.rect(Math.round(ox + x * z), py, q, q); }
+    ctx.fill();
   } else if (style === 'dots') {
     if (z < 8) return;
     ctx.fillStyle = C.grid2; const r = Math.max(0.9, z * 0.045); ctx.beginPath();
@@ -6949,6 +6950,19 @@ function chunkTint(c) {
   const base = best === 255 ? Look.packedStone : best === 7 && ds > 0 ? dispInfo(Math.max(1, Math.round(ds / dn))).pk : Look.packed[best], a = Math.round(90 + 165 * Math.min(1, n / 256));
   return (((base & 0xffffff) | (a << 24)) >>> 0);
 }
+const CB = { img: null, buf: null };
+function chunkBitmap(c) {
+  if (c.bc && c.bv === c.ver && c.br === Look.rev) return c.bc;
+  if (!CB.img) { CB.img = new ImageData(32, 32); CB.buf = new Uint32Array(CB.img.data.buffer); }
+  const buf = CB.buf, P = Look.packed, type = c.type, st = c.st, stone = (Look.packedStone | 0xff000000) >>> 0, dispOff = ((P[7] & 0xffffff) | 0x1a000000) >>> 0;
+  for (let i = 0; i < 1024; i++) {
+    const t = type[i], s = st[i];
+    buf[i] = t === 7 ? (s > 0 ? dispInfo(s).pk : dispOff) : s > 0 ? stone : t ? P[t] : 0;
+  }
+  if (!c.bc) { c.bc = document.createElement('canvas'); c.bc.width = c.bc.height = 32; c.bg = c.bc.getContext('2d'); }
+  c.bg.putImageData(CB.img, 0, 0); c.bv = c.ver; c.br = Look.rev;
+  return c.bc;
+}
 const OV = { w: null, mods: -1, rev: -1, t: 0, bx: 0, by: 0, dims: [], bufs: [], cvs: [] };
 function ovBuild(w) {
   let x0 = 1e18, x1 = -1e18, y0 = 1e18, y1 = -1e18;
@@ -6998,7 +7012,8 @@ function drawOverview(ctx, w, ox, oy, W, H, z, dpr) {
   ctx.drawImage(cv, sx0, sy0, sx1 - sx0, sy1 - sy0, dx + sx0 * sc, dy + sy0 * sc, (sx1 - sx0) * sc, (sy1 - sy0) * sc);
   return true;
 }
-function rasterWorld(ctx, list, ox, oy, W, H, z, dpr) {
+function rasterWorld(ctx, list, ox, oy, W, H, z, dpr0) {
+  const dpr = z < 2.5 ? 1 : dpr0;
   const R = Raster, bw = Math.max(1, Math.ceil(W * dpr)), bh = Math.max(1, Math.ceil(H * dpr));
   if (!R.cv || R.w !== bw || R.h !== bh) {
     R.cv = document.createElement('canvas'); R.cv.width = bw; R.cv.height = bh; R.g = R.cv.getContext('2d');
@@ -7015,28 +7030,36 @@ function rasterWorld(ctx, list, ox, oy, W, H, z, dpr) {
       for (let yy = Math.max(0, py); yy < Math.min(bh, py + side); yy++) for (let xx = Math.max(0, px); xx < Math.min(bw, px + side); xx++) buf[yy * bw + xx] = c.mc;
     }
     R.g.putImageData(R.img, 0, 0);
-    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.imageSmoothingEnabled = false; ctx.globalAlpha = 1; ctx.drawImage(R.cv, 0, 0); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.imageSmoothingEnabled = false; ctx.globalAlpha = 1; ctx.drawImage(R.cv, 0, 0, Math.round(W * dpr0), Math.round(H * dpr0)); ctx.setTransform(dpr0, 0, 0, dpr0, 0, 0);
     return;
   }
-  const oxd = ox * dpr, oyd = oy * dpr, cp = new Int32Array(32), rp = new Int32Array(32);
+  const oxd = ox * dpr, oyd = oy * dpr, cp = new Int32Array(32), rp = new Int32Array(32), spr = k >= 10, S = Math.max(2, Math.ceil(k)), dsz = q >= 3 ? Math.max(1, Math.round(q * 0.28)) : 0, st1 = (Look.packedStone | 0xff000000) >>> 0;
+  const dispOff = ((Look.packed[7] & 0xffffff) | 0x1a000000) >>> 0;
   for (const c of list) {
-    const type = c.type, st = c.st, bx = oxd + c.cx * 32 * k, by = oyd + c.cy * 32 * k;
+    const type = c.type, dir = c.dir, st = c.st, bx = oxd + c.cx * 32 * k, by = oyd + c.cy * 32 * k;
     for (let j = 0; j < 32; j++) { cp[j] = Math.floor(bx + j * k); rp[j] = Math.floor(by + j * k); }
     for (let ly = 0; ly < 32; ly++) {
       const py = rp[ly]; if (py + q <= 0 || py >= bh) continue;
       for (let lx = 0, i = ly << 5; lx < 32; lx++, i++) {
-        const t = type[i]; if (!t && !st[i]) continue;
+        const t = type[i], s = st[i]; if (!t && !s) continue;
         const px = cp[lx]; if (px + q <= 0 || px >= bw) continue;
-        const col = t === 7 && st[i] > 0 ? dispInfo(st[i]).pk : t ? P[t] : stone;
-        if (q === 1) buf[py * bw + px] = col;
-        else { const xa = Math.max(0, px), xb = Math.min(bw, px + q); for (let yy = Math.max(0, py); yy < Math.min(bh, py + q); yy++) buf.fill(col, yy * bw + xa, yy * bw + xb); }
+        if (spr && t && t !== 7 && t !== 11) rasterBlit(R, spriteData(t, dir[i], z, dpr), S, px, py);
+        else {
+          const col = t === 7 ? (s > 0 ? dispInfo(s).pk : dispOff) : t ? P[t] : stone;
+          if (q === 1) buf[py * bw + px] = col;
+          else { const xa = Math.max(0, px), xb = Math.min(bw, px + q); for (let yy = Math.max(0, py); yy < Math.min(bh, py + q); yy++) buf.fill(col, yy * bw + xa, yy * bw + xb); }
+        }
+        if (dsz && s > 0 && t && t !== 7) {
+          const xa = Math.max(0, px + q - dsz - 1), xb = Math.min(bw, px + q - 1);
+          if (xb > xa) for (let yy = Math.max(0, py + 1); yy < Math.min(bh, py + 1 + dsz); yy++) buf.fill(st1, yy * bw + xa, yy * bw + xb);
+        }
       }
     }
   }
   R.g.putImageData(R.img, 0, 0);
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.imageSmoothingEnabled = false; ctx.globalAlpha = 1;
-  ctx.drawImage(R.cv, 0, 0);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.drawImage(R.cv, 0, 0, Math.round(W * dpr0), Math.round(H * dpr0));
+  ctx.setTransform(dpr0, 0, 0, dpr0, 0, 0);
 }
 
 function renderWorld(ctx, w, view, W, H, dpr, showGrid, style, noAxis) {
@@ -7062,9 +7085,10 @@ function renderWorld(ctx, w, view, W, H, dpr, showGrid, style, noAxis) {
   const cx0 = x0 >> 5, cx1 = x1 >> 5, cy0 = y0 >> 5, cy1 = y1 >> 5;
   const small = z < 3;
   const sp = new Path2D(), tx = [], disp = [], syms = [];
-  const vis = small && z * dpr < 0.5 && (x1 - x0) * (y1 - y0) > 60000 ? [] : visibleChunks(w, cx0, cx1, cy0, cy1), useSprites = !small && z < 16 && (x1 - x0) * (y1 - y0) > 6000;
+  const vis = z < 14 && z * dpr < 0.5 && (x1 - x0) * (y1 - y0) > 3000 ? [] : visibleChunks(w, cx0, cx1, cy0, cy1), useSprites = !small && z < 16 && (x1 - x0) * (y1 - y0) > 6000;
+  if (z < 14 && (x1 - x0) * (y1 - y0) > 3000) { if (z * dpr < 0.5 && drawOverview(ctx, w, ox, oy, W, H, z, dpr)) return;
+    if (z * dpr < 3 && vis.length <= 2500) { ctx.imageSmoothingEnabled = false; ctx.globalAlpha = 1; const cs = 32 * z; for (const c of vis) ctx.drawImage(chunkBitmap(c), Math.round(ox + c.cx * cs), Math.round(oy + c.cy * cs), Math.ceil(cs), Math.ceil(cs)); return; } rasterWorld(ctx, visibleChunks(w, cx0, cx1, cy0, cy1), ox, oy, W, H, z, dpr); return; }
   const RS = useSprites ? rasterBegin(W, H, dpr) : null;
-  if (small && (x1 - x0) * (y1 - y0) > 60000) { if (z * dpr < 0.5 && drawOverview(ctx, w, ox, oy, W, H, z, dpr)) return; rasterWorld(ctx, visibleChunks(w, cx0, cx1, cy0, cy1), ox, oy, W, H, z, dpr); return; }
   for (const c of vis) {
     const cx = c.cx, cy = c.cy;
     const lx0 = Math.max(0, x0 - cx * 32), lx1 = Math.min(31, x1 - cx * 32);
@@ -7831,7 +7855,12 @@ function startWorker() {
     if (m.cmd === 'ready') { st.ready = true; return; }
     if (m.cmd === 'delta' || m.cmd === 'stopped') {
       if (m.cmd === 'delta') {
-        for (let j = 0; j < m.idx.length; j++) { const c = w.getChunk(m.cx[j], m.cy[j], true); c.st[m.idx[j]] = m.val[j]; c.ver = ++w.vc; }
+        let lc = null, lx = 0, ly = 0;
+        for (let j = 0; j < m.idx.length; j++) {
+          const x = m.cx[j], y = m.cy[j];
+          if (!lc || x !== lx || y !== ly) { lc = w.getChunk(x, y, true); lx = x; ly = y; lc.ver = ++w.vc; }
+          lc.st[m.idx[j]] = m.val[j];
+        }
         w.tick = m.tick; w.mods++; E.tw.n += m.ticks; E.need = true; E.dirtySave = true;
       }
       if (m.cmd === 'stopped') {
@@ -7910,7 +7939,7 @@ function frame(now) {
   simulate(now); updateCellTip();
   setDis('btnRewind', !E.snap); setDis('btnTUndo', !E.world.hist.length); setDis('btnTRedo', !E.world.redoN);
   if (E.need) { E.need = false; draw(); updateSelUI(); drawMini(); if (!Cfg.hideInfo) updateHud(); }
-  if (E.dirtySave && !E.saving && E.meta && now - E.lastSave > Math.max(4000, ((E.meta.cells || 0) / 2500))) saveNow(false);
+  if (E.dirtySave && !E.saving && E.meta && now - E.lastSave > Math.max(4000, ((E.meta.cells || 0) / 40))) saveNow(false);
 }
 function softFrame(ctx, x, y, w, h, col, fillA, strokeA, dash) {
   const r = Math.min(10, w / 4, h / 4);
