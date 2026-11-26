@@ -1,3 +1,5 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Pebble Automaton</title>
 <meta name="description" content="Pebble Automaton: an infinite cellular field where pebbles travel along wires. Build circuits, solve puzzles, share worlds.">
 <meta name="theme-color" content="#f4f5f6">
@@ -5,6 +7,9 @@
 <link rel="icon" type="image/png" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <meta name="color-scheme" content="light dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <style>
 hr.divider { border: 0; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
 #aboutLine { color: var(--muted); font-size: 13px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
@@ -82,7 +87,8 @@ hr.divider { border: 0; border-top: 1px solid var(--line); margin: 4px 0; width:
 *::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
 *::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
 [hidden] { display: none !important; }
-html, body { height: 100%; }
+html, body { margin: 0; padding: 0; height: 100%; overscroll-behavior: none; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; }
+@supports (height: 100dvh) { html, body { height: 100dvh; } }
 body { background: var(--bg); color: var(--ink); font-size: 16px; line-height: 1.45; overflow: hidden; }
 button, input, textarea { font: inherit; color: inherit; }
 h1, h2, h3 { margin: 0; text-wrap: balance; }
@@ -462,6 +468,8 @@ body.tb-r #lesson, body.tb-r #puzzle { right: auto; left: var(--gl); }
 body.mobile #lesson, body.mobile #puzzle { width: calc(100% - var(--gl) - var(--gr)); left: var(--gl); right: auto; max-height: 40%; }
 body:not(.mobile) #mbar, body:not(.mobile) #radBtn { display: none; }
 body.mobile #radBtn { display: inline-flex; }
+body.short #mbar { right: calc(var(--gr) + 62px); }
+body.short #radBtn { bottom: 8px; }
 body.mobile .hidem, body.mobile #hints { display: none !important; }
 body.mobile #mini { width: 120px; height: 80px; }
 body.mobile #worldTitle { max-width: 110px; }
@@ -778,6 +786,7 @@ body.mobile .row { flex-wrap: wrap; }
     <h3 id="exportTitle"></h3>
     <div class="seg"><button class="btn small" id="fmtCjk" data-i="formatCjk"></button><button class="btn small" id="fmtLatin" data-i="formatLatin"></button></div>
     <label class="chk" id="expDescRow"><input type="checkbox" id="expNoDesc"><span data-i="expNoDesc"></span></label>
+    <label class="chk" id="expAnchorRow" hidden><input type="checkbox" id="expAnchor"><span data-i="expAnchor"></span></label>
     <textarea id="exportText" readonly spellcheck="false"></textarea>
     <div class="note" id="exportInfo"></div>
     <div class="line-end"><button class="btn primary" id="exportCopy"><span class="ic" data-ic="copy"></span><span data-i="copy"></span></button><button class="btn" id="exportLink"><span class="ic" data-ic="link"></span><span data-i="shareLink"></span></button><button class="btn" id="exportDownload"><span class="ic" data-ic="download"></span><span data-i="download"></span></button><button class="btn" id="exportBin"><span class="ic" data-ic="download"></span><span data-i="downloadBin"></span></button><button class="btn" data-close="exportDlg" ><span class="ic" data-ic="x"></span><span data-i="close"></span></button></div>
@@ -807,7 +816,7 @@ class Chunk {
     this.mark = new Uint32Array(N);
     this.nb = new Array(9).fill(null);
     this.srcN = 0;
-    this.ver = 0; this.mv = -1; this.mc = 0;
+    this.ver = 0; this.mv = -1; this.mc = 0; this.dg = 0; this.sh = null;
   }
   isEmpty() {
     const t = this.type, s = this.st;
@@ -825,7 +834,7 @@ class World {
     this.nextC = []; this.nextI = [];
     this.srcC = []; this.srcI = []; this.srcDirty = false;
     this.opC = []; this.opI = new Int32Array(4096); this.opD = new Float64Array(4096); this.opN = 0;
-    this.track = null;
+    this.track = null; this.dgen = 1; this.mods = 0; this.vc = 0;
     this.recOn = true; this.recMax = 1500000; this.recCount = 0; this.hist = []; this.redoN = 0;
   }
   dropHist() { if (this.hist.length) { this.hist = []; this.recCount = 0; } this.redoN = 0; }
@@ -864,7 +873,7 @@ class World {
     if (isSrcT(old)) c.srcN--;
     if (isSrcT(t)) c.srcN++;
     if (isSrcT(old) || isSrcT(t)) this.srcDirty = true;
-    c.type[i] = t; c.ver++;
+    c.type[i] = t; c.ver = ++this.vc; this.mods++;
     c.dir[i] = DIRECTIONAL[t] ? (d & (VARIANT[t] ? 7 : 3)) : 0;
     this.touch(c, i);
   }
@@ -874,24 +883,20 @@ class World {
     const c = this.getChunk(x >> 5, y >> 5, s > 0);
     if (!c) return;
     const i = ((y & 31) << 5) | (x & 31);
-    c.st[i] = s; c.ver++;
+    c.st[i] = s; c.ver = ++this.vc; this.mods++;
     this.touch(c, i);
   }
   setCell(x, y, t, d, s) { this.setType(x, y, t, d); this.setStones(x, y, s); }
 
   clear() {
     this.dropHist();
-    this.chunks.clear(); this.tick = 0;
+    this.chunks.clear(); this.tick = 0; this.mods++;
     this.curC = []; this.curI = []; this.curGen = 1; this.nextC = []; this.nextI = [];
     this.srcC = []; this.srcI = []; this.srcDirty = false;
   }
 
   pushOp(c, i, v) {
-    let n = this.opN;
-    if (n === this.opI.length) {
-      const a = new Int32Array(n * 2); a.set(this.opI); this.opI = a;
-      const b = new Float64Array(n * 2); b.set(this.opD); this.opD = b;
-    }
+    const n = this.opN;
     this.opC[n] = c; this.opI[n] = i; this.opD[n] = v; this.opN = n + 1;
   }
   addOp(c, i, dx, dy, v) {
@@ -935,8 +940,8 @@ class World {
   undoTick() {
     if (!this.hist.length) return false;
     const r = this.hist.pop(); this.recCount -= r.c.length;
-    for (let k = r.c.length - 1; k >= 0; k--) { r.c[k].st[r.i[k]] = r.v[k]; r.c[k].ver++; }
-    this.rng = r.rng; this.tick--;
+    for (let k = r.c.length - 1; k >= 0; k--) { r.c[k].st[r.i[k]] = r.v[k]; r.c[k].ver = ++this.vc; }
+    this.rng = r.rng; this.tick--; this.mods++;
     this.curC = r.actC; this.curI = r.actI; this.curGen++;
     for (let k = 0; k < this.curC.length; k++) this.curC[k].mark[this.curI[k]] = this.curGen;
     this.redoN++; return true;
@@ -945,7 +950,9 @@ class World {
   stepCore() {
     if (this.srcDirty) this.rebuildSrc();
     const C = this.curC, I = this.curI, n = C.length;
-    const rec = this.recOn ? { c: [], i: [], v: [], actC: C.slice(), actI: I.slice(), rng: this.rng } : null;
+    const rec = this.recOn ? { c: null, i: null, v: null, actC: C.slice(), actI: I.slice(), rng: this.rng } : null;
+    const need = n * 4 + this.srcC.length * 2 + 16;
+    if (this.opI.length < need) { const sz = Math.max(need, this.opI.length * 2); this.opI = new Int32Array(sz); this.opD = new Float64Array(sz); }
     this.opN = 0;
     for (let k = 0; k < n; k++) {
       const c = C[k], i = I[k], s = c.st[i];
@@ -1007,21 +1014,21 @@ class World {
     }
     const ng = this.curGen + 1, nc = this.nextC, ni = this.nextI;
     nc.length = 0; ni.length = 0;
-    const oc = this.opC, oi = this.opI, od = this.opD, m = this.opN, trk = this.track;
+    const oc = this.opC, oi = this.opI, od = this.opD, m = this.opN, trk = this.track, dg = this.dgen;
+    let rc = null, ri = null, rv = null;
+    if (rec) { rc = new Array(m); ri = oi.slice(0, m); rv = new Float64Array(m); rec.c = rc; rec.i = ri; rec.v = rv; }
+    const vc = ++this.vc, ov = [];
     for (let k = 0; k < m; k++) {
-      const c = oc[k], i = oi[k], dv = od[k];
-      if (rec) { rec.c.push(c); rec.i.push(i); rec.v.push(c.st[i]); }
-      if (trk) { const dm = c.dm || (c.dm = new Uint8Array(N)); if (!dm[i]) { dm[i] = 1; trk.push(c, i); } }
-      c.st[i] += dv; c.ver++;
+      const c = oc[k], i = oi[k], dv = od[k], st = c.st;
+      if (rec) { rc[k] = c; rv[k] = st[i]; }
+      if (trk && c.dg !== dg) { c.dg = dg; (c.sh || (c.sh = new Float64Array(N))).set(st); trk.push(c); }
+      const v = st[i] + dv; st[i] = v; c.ver = vc;
+      if (v > MAXS) ov.push(c, i);
       if (dv > 0 && PUSH[c.type[i]] && c.mark[i] !== ng) { c.mark[i] = ng; nc.push(c); ni.push(i); }
     }
-    for (let k = 0; k < m; k++) {
-      const c = oc[k], i = oi[k];
-      if (c.st[i] > MAXS) c.st[i] = MAXS;
-      oc[k] = null;
-    }
+    for (let k = 0; k < ov.length; k += 2) if (ov[k].st[ov[k + 1]] > MAXS) ov[k].st[ov[k + 1]] = MAXS;
     this.curC = nc; this.curI = ni; this.nextC = C; this.nextI = I; this.curGen = ng;
-    this.tick++;
+    this.tick++; this.mods++;
     if (rec) {
       this.hist.push(rec); this.recCount += rec.c.length;
       let drop = 0;
@@ -1084,12 +1091,13 @@ class ByteWriter {
   done() { return this.buf.subarray(0, this.n); }
 }
 
-function packWorld(data, name, desc) {
+function packWorld(data, name, desc, view) {
   const ch = data.chunks.slice().sort((p, q) => p.cy - q.cy || p.cx - q.cx);
   const w = new ByteWriter(ch.length * 1100 + 4096), enc = new TextEncoder();
-  w.byte(desc ? 2 : 1);
+  w.byte(view ? 3 : desc ? 2 : 1);
   const nb = enc.encode(name || ''); w.varint(nb.length); w.bytes(nb);
-  if (desc) { const db = enc.encode(desc.slice(0, 30000)); w.varint(db.length); w.bytes(db); }
+  if (desc || view) { const db = enc.encode((desc || '').slice(0, 30000)); w.varint(db.length); w.bytes(db); }
+  if (view) { w.varint(zz(Math.round(view.x * 1000))); w.varint(zz(Math.round(view.y * 1000))); w.varint(Math.max(1, Math.round(view.z * 1e6))); }
   w.varint(data.tick || 0);
   w.varint(ch.length);
   let px = 0, py = 0;
@@ -1104,11 +1112,13 @@ function unpackWorld(u) {
   const get = () => { if (p >= u.length) throw new Error('обрыв данных'); return u[p++]; };
   const getVar = () => { let v = 0, m = 1, b; do { b = get(); v += (b & 127) * m; m *= 128; } while (b & 128); return v; };
   const ver = get();
-  if (ver !== 1 && ver !== 2) throw new Error('неизвестная версия формата');
+  if (ver < 1 || ver > 3) throw new Error('неизвестная версия формата');
   const nl = getVar();
   const name = new TextDecoder().decode(u.subarray(p, p + nl)); p += nl;
   let desc = '';
-  if (ver === 2) { const dl = getVar(); if (dl > 40000) throw new Error('неверное описание'); desc = new TextDecoder().decode(u.subarray(p, p + dl)); p += dl; }
+  if (ver >= 2) { const dl = getVar(); if (dl > 40000) throw new Error('неверное описание'); desc = new TextDecoder().decode(u.subarray(p, p + dl)); p += dl; }
+  let view = null;
+  if (ver === 3) { const vx = unzz(getVar()) / 1000, vy = unzz(getVar()) / 1000, vz = getVar() / 1e6; view = { x: vx, y: vy, z: vz }; }
   const tick = getVar();
   const n = getVar();
   if (n > 4e6) throw new Error('слишком много чанков');
@@ -1123,7 +1133,7 @@ function unpackWorld(u) {
     c.type[i] = t; c.dir[i] = d;
   }
   for (const c of ch) for (let i = 0; i < 1024; i++) c.st[i] = getVar();
-  return { name, desc, data: { chunks: ch, tick } };
+  return { name, desc, view, data: { chunks: ch, tick } };
 }
 
 async function pipe(bytes, stream) {
@@ -1211,7 +1221,7 @@ async function seal(raw, bundle, latin) {
   if (latin === 'bin') return all;
   return latin ? toLatin(all) : toText(all);
 }
-const exportWorld = (data, name, latin, desc) => seal(packWorld(data, name, desc), false, latin);
+const exportWorld = (data, name, latin, desc, view) => seal(packWorld(data, name, desc, view), false, latin);
 
 async function exportBundle(items, latin) {
   const parts = items.map(it => packWorld(it.data, it.name, it.desc));
@@ -2416,8 +2426,7 @@ STR.be = {
     ['Q', 'піпетка'],
     ['R', 'гумка'],
     ['M', 'колькасць камянёў'],
-    ['стрэлкі', 'рухаць поле'],
-    ['N', 'N тактаў']
+    ['стрэлкі', 'рухаць поле']
   ],
   hintsBrush: [
     ['ЛКМ', 'паставіць'],
@@ -2426,8 +2435,7 @@ STR.be = {
     ['F', 'адбіць'],
     ['Q', 'піпетка'],
     ['~', 'зняць выбар'],
-    ['M', 'колькасць камянёў'],
-    ['N', 'N тактаў']
+    ['M', 'колькасць камянёў']
   ],
   hintsStone: [
     ['ЛКМ', '+1 камень'],
@@ -2501,6 +2509,7 @@ STR.be = {
   radDeadL: 'Адхіленне для выбару',
   radPress: 'Націсніце клавішу або кнопку мышы',
   expNoDesc: 'Не ўключаць апісанне',
+  expAnchor: 'Дадаць бягучае месца і маштаб',
   tabAnim: 'Анімацыі',
   hideTips: 'Схаваць падказкі пры навядзенні',
   animReset: 'Скінуць да стандартных',
@@ -2667,7 +2676,7 @@ STR.be = {
   exportAllDone: n => 'Экспартавана: ' + n,
   optChunks: 'Межы чанкаў',
   keySpace: 'Прагал',
-  speedTip: 'Свая хуткасць',
+  speedTip: 'Свая хуткасць (G)',
   askTps: 'TPS',
   hideUi: 'Схаваць інтэрфейс',
   pzSolved: () => 'Рашана!',
@@ -2890,8 +2899,7 @@ STR.de = {
     ['Q', 'Pipette'],
     ['R', 'Radierer'],
     ['M', 'Steinzahl'],
-    ['Pfeile', 'Feld verschieben'],
-    ['N', 'N Ticks laufen']
+    ['Pfeile', 'Feld verschieben']
   ],
   hintsBrush: [
     ['LMT', 'setzen'],
@@ -2900,8 +2908,7 @@ STR.de = {
     ['F', 'spiegeln'],
     ['Q', 'Pipette'],
     ['~', 'abwählen'],
-    ['M', 'Steinzahl'],
-    ['N', 'N Ticks laufen']
+    ['M', 'Steinzahl']
   ],
   hintsStone: [
     ['LMT', '+1 Stein'],
@@ -2975,6 +2982,7 @@ STR.de = {
   radDeadL: 'Abweichung zur Auswahl',
   radPress: 'Drücke eine Taste oder Maustaste',
   expNoDesc: 'Beschreibung weglassen',
+  expAnchor: 'Aktuelle Position und Zoom einbeziehen',
   tabAnim: 'Animationen',
   hideTips: 'Hover-Tooltips ausblenden',
   animReset: 'Auf Standard zurücksetzen',
@@ -3141,7 +3149,7 @@ STR.de = {
   exportAllDone: n => 'Exportiert: ' + n,
   optChunks: 'Chunk-Grenzen',
   keySpace: 'Space',
-  speedTip: 'Eigenes Tempo',
+  speedTip: 'Eigenes Tempo (G)',
   askTps: 'TPS',
   hideUi: 'Oberfläche ausblenden',
   pzSolved: () => 'Gelöst!',
@@ -3385,8 +3393,7 @@ STR.en = {
     ['Q', 'eyedropper'],
     ['R', 'eraser'],
     ['M', 'pebble count'],
-    ['Arrows', 'move the field'],
-    ['N', 'run N ticks']
+    ['Arrows', 'move the field']
   ],
   hintsBrush: [
     ['LMB', 'place'],
@@ -3395,8 +3402,7 @@ STR.en = {
     ['F', 'mirror'],
     ['Q', 'eyedropper'],
     ['~', 'deselect'],
-    ['M', 'pebble count'],
-    ['N', 'run N ticks']
+    ['M', 'pebble count']
   ],
   hintsStone: [
     ['LMB', '+1 pebble'],
@@ -3470,6 +3476,7 @@ STR.en = {
   radDeadL: 'Deviation to select',
   radPress: 'Press a key or a mouse button',
   expNoDesc: 'Leave out the description',
+  expAnchor: 'Include current position and zoom',
   tabAnim: 'Animations',
   hideTips: 'Hide hover tooltips',
   animReset: 'Reset to defaults',
@@ -3638,7 +3645,7 @@ STR.en = {
   pzGen: 'Generating a puzzle...',
   askTps: 'TPS',
   keySpace: 'Space',
-  speedTip: 'Custom speed',
+  speedTip: 'Custom speed (G)',
   hideUi: 'Hide interface',
   pzSolved: () => 'Solved!',
   pzFail: (t, g, w) => 'Check ' + (t + 1) + ' failed: got ' + g + ', need ' + w,
@@ -3859,8 +3866,7 @@ STR.es = {
     ['Q', 'cuentagotas'],
     ['R', 'borrador'],
     ['M', 'núm. de piedras'],
-    ['Flechas', 'mover el campo'],
-    ['N', 'ejecutar N tics']
+    ['Flechas', 'mover el campo']
   ],
   hintsBrush: [
     ['Clic izq.', 'colocar'],
@@ -3869,8 +3875,7 @@ STR.es = {
     ['F', 'reflejar'],
     ['Q', 'cuentagotas'],
     ['~', 'deseleccionar'],
-    ['M', 'núm. de piedras'],
-    ['N', 'ejecutar N tics']
+    ['M', 'núm. de piedras']
   ],
   hintsStone: [
     ['Clic izq.', '+1 piedra'],
@@ -3944,6 +3949,7 @@ STR.es = {
   radDeadL: 'Desviación para elegir',
   radPress: 'Pulsa una tecla o un botón del ratón',
   expNoDesc: 'Omitir la descripción',
+  expAnchor: 'Incluir la posición y el zoom actuales',
   tabAnim: 'Animaciones',
   hideTips: 'Ocultar globos de ayuda',
   animReset: 'Restablecer valores',
@@ -4110,7 +4116,7 @@ STR.es = {
   exportAllDone: n => 'Exportados: ' + n,
   optChunks: 'Bordes de chunks',
   keySpace: 'Espacio',
-  speedTip: 'Velocidad personalizada',
+  speedTip: 'Velocidad personalizada (G)',
   askTps: 'TPS',
   hideUi: 'Ocultar la interfaz',
   pzSolved: () => '¡Resuelto!',
@@ -4333,8 +4339,7 @@ STR.fr = {
     ['Q', 'pipette'],
     ['R', 'gomme'],
     ['M', 'nb de cailloux'],
-    ['Flèches', 'déplacer le champ'],
-    ['N', 'lancer N ticks']
+    ['Flèches', 'déplacer le champ']
   ],
   hintsBrush: [
     ['Clic G', 'placer'],
@@ -4343,8 +4348,7 @@ STR.fr = {
     ['F', 'miroir'],
     ['Q', 'pipette'],
     ['~', 'désélectionner'],
-    ['M', 'nb de cailloux'],
-    ['N', 'lancer N ticks']
+    ['M', 'nb de cailloux']
   ],
   hintsStone: [
     ['Clic G', '+1 caillou'],
@@ -4418,6 +4422,7 @@ STR.fr = {
   radDeadL: 'Écart pour sélectionner',
   radPress: 'Appuyez sur une touche ou un bouton de la souris',
   expNoDesc: 'Omettre la description',
+  expAnchor: 'Inclure la position et le zoom actuels',
   tabAnim: 'Animations',
   hideTips: 'Masquer les infobulles',
   animReset: 'Rétablir les valeurs par défaut',
@@ -4584,7 +4589,7 @@ STR.fr = {
   exportAllDone: n => 'Exportés : ' + n,
   optChunks: 'Bordures des chunks',
   keySpace: 'Espace',
-  speedTip: 'Vitesse personnalisée',
+  speedTip: 'Vitesse personnalisée (G)',
   askTps: 'TPS',
   hideUi: 'Masquer l\'interface',
   pzSolved: () => 'Résolu !',
@@ -4807,8 +4812,7 @@ STR.ja = {
     ['Q', 'スポイト'],
     ['R', '消しゴム'],
     ['M', '石の数'],
-    ['矢印', 'フィールドを移動'],
-    ['N', 'Nティック実行']
+    ['矢印', 'フィールドを移動']
   ],
   hintsBrush: [
     ['左クリック', '配置'],
@@ -4817,8 +4821,7 @@ STR.ja = {
     ['F', '反転'],
     ['Q', 'スポイト'],
     ['~', '選択解除'],
-    ['M', '石の数'],
-    ['N', 'Nティック実行']
+    ['M', '石の数']
   ],
   hintsStone: [
     ['左クリック', '石+1'],
@@ -4892,6 +4895,7 @@ STR.ja = {
   radDeadL: '選択に必要なずれ',
   radPress: 'キーまたはマウスボタンを押してください',
   expNoDesc: '説明を含めない',
+  expAnchor: '現在の位置と拡大率を含める',
   tabAnim: 'アニメーション',
   hideTips: 'ホバーのヒントを隠す',
   animReset: '初期値に戻す',
@@ -5058,7 +5062,7 @@ STR.ja = {
   exportAllDone: n => 'エクスポート数：' + n,
   optChunks: 'チャンクの境界',
   keySpace: 'Space',
-  speedTip: '速度を指定',
+  speedTip: '速度を指定 (G)',
   askTps: 'TPS',
   hideUi: 'インターフェースを隠す',
   pzSolved: () => '正解です！',
@@ -5302,8 +5306,7 @@ STR.ru = {
     ['Q', 'пипетка'],
     ['R', 'ластик'],
     ['M', 'число камней'],
-    ['стрелки', 'двигать поле'],
-    ['N', 'выполнить N тактов']
+    ['стрелки', 'двигать поле']
   ],
   hintsBrush: [
     ['ЛКМ', 'поставить'],
@@ -5312,8 +5315,7 @@ STR.ru = {
     ['F', 'отразить'],
     ['Q', 'пипетка'],
     ['~', 'снять выбор'],
-    ['M', 'число камней'],
-    ['N', 'выполнить N тактов']
+    ['M', 'число камней']
   ],
   hintsStone: [
     ['ЛКМ', '+1 камень'],
@@ -5387,6 +5389,7 @@ STR.ru = {
   radDeadL: 'Отклонение для выбора',
   radPress: 'Нажмите клавишу или кнопку мыши',
   expNoDesc: 'Не включать описание',
+  expAnchor: 'Включить текущее место и масштаб',
   tabAnim: 'Анимации',
   hideTips: 'Скрыть всплывающие подсказки',
   animReset: 'Сбросить по умолчанию',
@@ -5555,7 +5558,7 @@ STR.ru = {
   pzGen: 'Создаю задачу...',
   askTps: 'TPS',
   keySpace: 'Пробел',
-  speedTip: 'Произвольная скорость',
+  speedTip: 'Произвольная скорость (G)',
   hideUi: 'Скрыть интерфейс',
   pzSolved: () => 'Решено!',
   pzFail: (t, g, w) => 'Проверка ' + (t + 1) + ' не прошла: получено ' + g + ', нужно ' + w,
@@ -5776,8 +5779,7 @@ STR.uk = {
     ['Q', 'піпетка'],
     ['R', 'гумка'],
     ['M', 'кількість каменів'],
-    ['стрілки', 'рухати поле'],
-    ['N', 'N тактів']
+    ['стрілки', 'рухати поле']
   ],
   hintsBrush: [
     ['ЛКМ', 'поставити'],
@@ -5786,8 +5788,7 @@ STR.uk = {
     ['F', 'віддзеркалити'],
     ['Q', 'піпетка'],
     ['~', 'зняти вибір'],
-    ['M', 'кількість каменів'],
-    ['N', 'N тактів']
+    ['M', 'кількість каменів']
   ],
   hintsStone: [
     ['ЛКМ', '+1 камінь'],
@@ -5861,6 +5862,7 @@ STR.uk = {
   radDeadL: 'Відхилення для вибору',
   radPress: 'Натисніть клавішу або кнопку миші',
   expNoDesc: 'Не включати опис',
+  expAnchor: 'Додати поточне місце й масштаб',
   tabAnim: 'Анімації',
   hideTips: 'Сховати спливаючі підказки',
   animReset: 'Скинути до стандартних',
@@ -6027,7 +6029,7 @@ STR.uk = {
   exportAllDone: n => 'Експортовано: ' + n,
   optChunks: 'Межі чанків',
   keySpace: 'Пробіл',
-  speedTip: 'Власна швидкість',
+  speedTip: 'Власна швидкість (G)',
   askTps: 'TPS',
   hideUi: 'Сховати інтерфейс',
   pzSolved: () => 'Розв\'язано!',
@@ -6250,8 +6252,7 @@ STR.zh = {
     ['Q', '取色'],
     ['R', '橡皮擦'],
     ['M', '石子数量'],
-    ['方向键', '移动画布'],
-    ['N', '运行 N 步']
+    ['方向键', '移动画布']
   ],
   hintsBrush: [
     ['左键', '放置'],
@@ -6260,8 +6261,7 @@ STR.zh = {
     ['F', '镜像'],
     ['Q', '取色'],
     ['~', '取消选择'],
-    ['M', '石子数量'],
-    ['N', '运行 N 步']
+    ['M', '石子数量']
   ],
   hintsStone: [
     ['左键', '加 1 颗'],
@@ -6335,6 +6335,7 @@ STR.zh = {
   radDeadL: '选中所需的偏移',
   radPress: '请按下一个键或鼠标按键',
   expNoDesc: '不含描述',
+  expAnchor: '包含当前位置和缩放',
   tabAnim: '动画',
   hideTips: '隐藏悬停提示',
   animReset: '恢复默认',
@@ -6501,7 +6502,7 @@ STR.zh = {
   exportAllDone: n => '已导出：' + n,
   optChunks: '区块边界',
   keySpace: '空格',
-  speedTip: '自定义速度',
+  speedTip: '自定义速度 (G)',
   askTps: 'TPS',
   hideUi: '隐藏界面',
   pzSolved: () => '解决了！',
@@ -6572,7 +6573,7 @@ function dispInfo(n) {
   if (!r) {
     const col = i <= 15 ? DISP_COL[i] : hsl2hex((i * 47) % 360, 62 + (i % 3) * 8, 42 + ((i >> 2) % 4) * 6);
     const v = parseInt(col.slice(1), 16);
-    r = { col, dark: (0.3 * (v >> 16) + 0.59 * ((v >> 8) & 255) + 0.11 * (v & 255)) < 150 };
+    r = { col, dark: (0.3 * (v >> 16) + 0.59 * ((v >> 8) & 255) + 0.11 * (v & 255)) < 150, pk: ((255 << 24) | ((v & 255) << 16) | (v & 0xff00) | (v >> 16)) >>> 0 };
     if (dispCache.size > 5000) dispCache.clear();
     dispCache.set(i, r);
   }
@@ -6827,6 +6828,7 @@ function drawBackground(ctx, style, ox, oy, x0, x1, y0, y1, W, H, z, chunks) {
   drawBackgroundStyle(ctx, style, ox, oy, x0, x1, y0, y1, W, H, z);
   if (!chunks) return;
   const step = z >= 1.5 ? 32 : 256;
+  if (step * z < 5) return;
   ctx.lineWidth = 2; ctx.strokeStyle = Look.C.axis; ctx.beginPath();
   for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) { const px = Math.round(ox + x * z); ctx.moveTo(px, 0); ctx.lineTo(px, H); }
   for (let y = Math.ceil(y0 / step) * step; y <= y1; y += step) { const py = Math.round(oy + y * z); ctx.moveTo(0, py); ctx.lineTo(W, py); }
@@ -6940,12 +6942,61 @@ function visibleChunks(w, cx0, cx1, cy0, cy1) {
 }
 
 function chunkTint(c) {
-  const cnt = new Uint16Array(256), type = c.type, st = c.st; let n = 0;
-  for (let i = 0; i < 1024; i++) { const t = type[i]; if (t) { cnt[t]++; n++; } else if (st[i]) { cnt[255]++; n++; } }
+  const cnt = new Uint16Array(256), type = c.type, st = c.st; let n = 0, ds = 0, dn = 0;
+  for (let i = 0; i < 1024; i++) { const t = type[i]; if (t) { cnt[t]++; n++; if (t === 7) { dn++; ds += st[i]; } } else if (st[i]) { cnt[255]++; n++; } }
   if (!n) return 0;
   let best = 255; for (let t = 1; t <= 12; t++) if (cnt[t] > cnt[best] || best === 255 && cnt[t] && cnt[t] >= cnt[255]) best = t;
-  const base = best === 255 ? Look.packedStone : Look.packed[best], a = Math.round(90 + 165 * Math.min(1, n / 256));
+  const base = best === 255 ? Look.packedStone : best === 7 && ds > 0 ? dispInfo(Math.max(1, Math.round(ds / dn))).pk : Look.packed[best], a = Math.round(90 + 165 * Math.min(1, n / 256));
   return (((base & 0xffffff) | (a << 24)) >>> 0);
+}
+const OV = { w: null, mods: -1, rev: -1, t: 0, bx: 0, by: 0, dims: [], bufs: [], cvs: [] };
+function ovBuild(w) {
+  let x0 = 1e18, x1 = -1e18, y0 = 1e18, y1 = -1e18;
+  for (const c of w.chunks.values()) { if (c.cx < x0) x0 = c.cx; if (c.cx > x1) x1 = c.cx; if (c.cy < y0) y0 = c.cy; if (c.cy > y1) y1 = c.cy; }
+  if (x1 < x0) return false;
+  let bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+  if (bw * bh > 12e6) return false;
+  OV.bx = x0; OV.by = y0; OV.dims = [[bw, bh]]; OV.cvs = [];
+  const b0 = OV.bufs[0] && OV.bufs[0].length >= bw * bh && OV.dims0 === bw * bh ? OV.bufs[0] : new Uint32Array(bw * bh);
+  b0.fill(0); OV.dims0 = bw * bh;
+  for (const c of w.chunks.values()) {
+    if (c.mv !== c.ver || c.mt !== Look.rev) { c.mt = Look.rev; c.mc = chunkTint(c); c.mv = c.ver; }
+    if (c.mc) b0[(c.cy - y0) * bw + c.cx - x0] = c.mc;
+  }
+  OV.bufs = [b0];
+  let pb = b0, pw = bw, ph = bh;
+  while (pw > 1 || ph > 1) {
+    const nw = (pw + 1) >> 1, nh = (ph + 1) >> 1, nb = new Uint32Array(nw * nh);
+    for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) {
+      let r = 0, g = 0, b = 0, a = 0, n = 0;
+      for (let dy = 0; dy < 2; dy++) { const yy = y * 2 + dy; if (yy >= ph) break; for (let dx = 0; dx < 2; dx++) { const xx = x * 2 + dx; if (xx >= pw) break; const v = pb[yy * pw + xx]; if (!v) continue; r += v & 255; g += (v >> 8) & 255; b += (v >> 16) & 255; const al = v >>> 24; if (al > a) a = al; n++; } }
+      if (n) nb[y * nw + x] = ((a << 24) | (((b / n) | 0) << 16) | (((g / n) | 0) << 8) | ((r / n) | 0)) >>> 0;
+    }
+    OV.bufs.push(nb); OV.dims.push([nw, nh]); pb = nb; pw = nw; ph = nh;
+  }
+  return true;
+}
+function ovGet(w) {
+  const now = performance.now();
+  if (OV.w === w && OV.rev === Look.rev && OV.bufs.length) {
+    if (OV.mods === w.mods) return OV;
+    if (now - OV.t < 250) return OV;
+  }
+  if (!ovBuild(w)) { OV.w = null; OV.bufs = []; return null; }
+  OV.w = w; OV.rev = Look.rev; OV.mods = w.mods; OV.t = now;
+  return OV;
+}
+function drawOverview(ctx, w, ox, oy, W, H, z, dpr) {
+  const o = ovGet(w); if (!o) return false;
+  const k = z * dpr, L = Math.min(o.bufs.length - 1, k * 32 < 1 ? Math.ceil(Math.log2(1 / (32 * k))) : 0), [lw, lh] = o.dims[L];
+  let cv = o.cvs[L];
+  if (!cv) { cv = o.cvs[L] = document.createElement('canvas'); cv.width = lw; cv.height = lh; const g = cv.getContext('2d'), im = g.createImageData(lw, lh); new Uint32Array(im.data.buffer).set(o.bufs[L]); g.putImageData(im, 0, 0); }
+  const sc = 32 * z * (1 << L), dx = ox + o.bx * 32 * z, dy = oy + o.by * 32 * z;
+  const sx0 = Math.max(0, Math.floor(-dx / sc)), sx1 = Math.min(lw, Math.ceil((W - dx) / sc)), sy0 = Math.max(0, Math.floor(-dy / sc)), sy1 = Math.min(lh, Math.ceil((H - dy) / sc));
+  if (sx1 <= sx0 || sy1 <= sy0) return true;
+  ctx.imageSmoothingEnabled = false; ctx.globalAlpha = 1;
+  ctx.drawImage(cv, sx0, sy0, sx1 - sx0, sy1 - sy0, dx + sx0 * sc, dy + sy0 * sc, (sx1 - sx0) * sc, (sy1 - sy0) * sc);
+  return true;
 }
 function rasterWorld(ctx, list, ox, oy, W, H, z, dpr) {
   const R = Raster, bw = Math.max(1, Math.ceil(W * dpr)), bh = Math.max(1, Math.ceil(H * dpr));
@@ -6976,7 +7027,7 @@ function rasterWorld(ctx, list, ox, oy, W, H, z, dpr) {
       for (let lx = 0, i = ly << 5; lx < 32; lx++, i++) {
         const t = type[i]; if (!t && !st[i]) continue;
         const px = cp[lx]; if (px + q <= 0 || px >= bw) continue;
-        const col = t ? P[t] : stone;
+        const col = t === 7 && st[i] > 0 ? dispInfo(st[i]).pk : t ? P[t] : stone;
         if (q === 1) buf[py * bw + px] = col;
         else { const xa = Math.max(0, px), xb = Math.min(bw, px + q); for (let yy = Math.max(0, py); yy < Math.min(bh, py + q); yy++) buf.fill(col, yy * bw + xa, yy * bw + xb); }
       }
@@ -7011,9 +7062,9 @@ function renderWorld(ctx, w, view, W, H, dpr, showGrid, style, noAxis) {
   const cx0 = x0 >> 5, cx1 = x1 >> 5, cy0 = y0 >> 5, cy1 = y1 >> 5;
   const small = z < 3;
   const sp = new Path2D(), tx = [], disp = [], syms = [];
-  const vis = visibleChunks(w, cx0, cx1, cy0, cy1), useSprites = !small && z < 16 && (x1 - x0) * (y1 - y0) > 6000;
+  const vis = small && z * dpr < 0.5 && (x1 - x0) * (y1 - y0) > 60000 ? [] : visibleChunks(w, cx0, cx1, cy0, cy1), useSprites = !small && z < 16 && (x1 - x0) * (y1 - y0) > 6000;
   const RS = useSprites ? rasterBegin(W, H, dpr) : null;
-  if (small && (x1 - x0) * (y1 - y0) > 60000) { rasterWorld(ctx, vis, ox, oy, W, H, z, dpr); return; }
+  if (small && (x1 - x0) * (y1 - y0) > 60000) { if (z * dpr < 0.5 && drawOverview(ctx, w, ox, oy, W, H, z, dpr)) return; rasterWorld(ctx, visibleChunks(w, cx0, cx1, cy0, cy1), ox, oy, W, H, z, dpr); return; }
   for (const c of vis) {
     const cx = c.cx, cy = c.cy;
     const lx0 = Math.max(0, x0 - cx * 32), lx1 = Math.min(31, x1 - cx * 32);
@@ -7052,6 +7103,7 @@ function renderWorld(ctx, w, view, W, H, dpr, showGrid, style, noAxis) {
 }
 
 
+const MINZ = 0.004;
 const SPEEDS = [1, 2, 5, 10, 20, 50, 100, 250, 1000, Infinity];
 
 const CELL_TOOLS = [
@@ -7440,7 +7492,7 @@ function updateHud() {
   if (I.tick) t.push(s.tick + ': ' + w.tick + (E.batch > 0 ? ' (+' + E.batch + ')' : ''));
   if (I.tps && E.running) t.push(E.tw.tps + ' ' + s.tps);
   if (I.fps) t.push(s.fps + ': ' + E.fps.v);
-  if (I.zoom) t.push('x' + (E.view.z / 40).toFixed(2));
+  if (I.zoom) t.push('x' + (E.view.z / 40 >= 0.1 ? (E.view.z / 40).toFixed(2) : (E.view.z / 40).toPrecision(2)));
   if (I.cells) { const now = performance.now(); if (now - cellsT > 500) { cellsN = w.cellCount(); cellsT = now; } t.push(s.cellsN + ': ' + cellsN); }
   if (t.length) ln.push(t.join(', '));
   h.textContent = ln.join('\n');
@@ -7586,13 +7638,13 @@ function movePinch() {
 }
 function zoomAt(sx, sy, f) {
   const v = E.view, wx = v.x + (sx - E.W / 2) / v.z, wy = v.y + (sy - E.H / 2) / v.z;
-  v.z = Math.max(2, Math.min(140, v.z * f));
+  v.z = Math.max(MINZ, Math.min(140, v.z * f));
   v.x = wx - (sx - E.W / 2) / v.z; v.y = wy - (sy - E.H / 2) / v.z;
   E.dirtySave = true; need();
 }
 function onWheel(e) {
   e.preventDefault(); const [sx, sy] = pos(e), f = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015));
-  if (Cfg.anim.zoom) E.zt = { z: Math.max(2, Math.min(140, (E.zt ? E.zt.z : E.view.z) * f)), sx, sy };
+  if (Cfg.anim.zoom) E.zt = { z: Math.max(MINZ, Math.min(140, (E.zt ? E.zt.z : E.view.z) * f)), sx, sy };
   else zoomAt(sx, sy, f);
   updateMouse(e);
 }
@@ -7779,8 +7831,8 @@ function startWorker() {
     if (m.cmd === 'ready') { st.ready = true; return; }
     if (m.cmd === 'delta' || m.cmd === 'stopped') {
       if (m.cmd === 'delta') {
-        for (let j = 0; j < m.idx.length; j++) { const c = w.getChunk(m.cx[j], m.cy[j], true); c.st[m.idx[j]] = m.val[j]; c.ver++; }
-        w.tick = m.tick; E.tw.n += m.ticks; E.need = true; E.dirtySave = true;
+        for (let j = 0; j < m.idx.length; j++) { const c = w.getChunk(m.cx[j], m.cy[j], true); c.st[m.idx[j]] = m.val[j]; c.ver = ++w.vc; }
+        w.tick = m.tick; w.mods++; E.tw.n += m.ticks; E.need = true; E.dirtySave = true;
       }
       if (m.cmd === 'stopped') {
         delete w.setType; delete w.setStones; wk.terminate(); if (E.wk === st) E.wk = null;
@@ -7958,6 +8010,7 @@ function applyView() {
   const touch = matchMedia('(hover: none) and (pointer: coarse)').matches;
   const small = touch ? Math.min(innerWidth, innerHeight) < 900 : innerWidth <= 600;
   document.body.classList.toggle('mobile', Cfg.mobile === 'on' || (Cfg.mobile === 'auto' && small));
+  document.body.classList.toggle('short', document.body.classList.contains('mobile') && innerWidth > innerHeight && innerHeight <= 520);
   $('mini').hidden = !Cfg.minimap; applyLayout(); need();
 }
 function mobAct(a) {
@@ -8062,7 +8115,7 @@ function initEditor() {
   mini.addEventListener('pointerdown', e => { mdrag = true; mini.setPointerCapture(e.pointerId); miniGo(e); });
   mini.addEventListener('pointermove', e => { if (mdrag) miniGo(e); });
   mini.addEventListener('pointerup', () => { mdrag = false; });
-  window.addEventListener('resize', applyView);
+  window.addEventListener('resize', applyView); window.addEventListener('orientationchange', () => setTimeout(() => { applyView(); resize(); }, 120));
   document.addEventListener('pointerdown', e => {
     if ($('editor').hidden || anyDialog() || e.button !== 0) return;
     const t = e.target; if (!t.closest || t.closest('#cv, #palette, button, input, textarea, #lesson, #puzzle, #selbar, #mbar, #mini, #numBox, .dlg, #tip')) return;
@@ -8729,17 +8782,28 @@ PUZZLES.forEach(p => { for (const l in PUZZLE_TR) if (PUZZLE_TR[l][p.id]) p[l] =
 function simWorkerMain() {
   let w = null, running = false, tps = 1, acc = 0, last = 0, flushedAt = 0, ticks = 0;
   const pending = [];
-  const mark = (c, i) => {
-    const m = c.dm || (c.dm = new Uint8Array(1024));
-    if (!m[i]) { m[i] = 1; pending.push(c, i); }
+  let cap = 65536, bx = new Int32Array(cap), by = new Int32Array(cap), bi = new Uint16Array(cap), bv = new Float64Array(cap);
+  const grow = () => {
+    cap *= 2;
+    const x = new Int32Array(cap), y = new Int32Array(cap), i = new Uint16Array(cap), v = new Float64Array(cap);
+    x.set(bx); y.set(by); i.set(bi); v.set(bv); bx = x; by = y; bi = i; bv = v;
+  };
+  const touch = c => {
+    if (c.dg === w.dgen) return;
+    c.dg = w.dgen; (c.sh || (c.sh = new Float64Array(1024))).set(c.st); pending.push(c);
   };
   const flush = () => {
-    const n = pending.length / 2, cx = new Int32Array(n), cy = new Int32Array(n), idx = new Uint16Array(n), val = new Float64Array(n);
-    for (let j = 0; j < n; j++) {
-      const c = pending[j * 2], i = pending[j * 2 + 1];
-      cx[j] = c.cx; cy[j] = c.cy; idx[j] = i; val[j] = c.st[i]; c.dm[i] = 0;
+    let n = 0;
+    for (let j = 0; j < pending.length; j++) {
+      const c = pending[j], st = c.st, sh = c.sh;
+      for (let i = 0; i < 1024; i++) {
+        if (st[i] === sh[i]) continue;
+        if (n === cap) grow();
+        bx[n] = c.cx; by[n] = c.cy; bi[n] = i; bv[n] = st[i]; n++;
+      }
     }
-    pending.length = 0;
+    pending.length = 0; w.dgen++;
+    const cx = bx.slice(0, n), cy = by.slice(0, n), idx = bi.slice(0, n), val = bv.slice(0, n);
     postMessage({ cmd: 'delta', cx, cy, idx, val, tick: w.tick, ticks }, [cx.buffer, cy.buffer, idx.buffer, val.buffer]);
     ticks = 0; flushedAt = performance.now();
   };
@@ -8764,19 +8828,21 @@ function simWorkerMain() {
     } else if (m.cmd === 'run') {
       tps = m.tps; if (!running) { running = true; last = performance.now(); acc = 0; flushedAt = last; loop(); }
     } else if (m.cmd === 'type') {
-      w.setType(m.x, m.y, m.t, m.d); const c = w.getChunk(m.x >> 5, m.y >> 5, false); if (c) mark(c, ((m.y & 31) << 5) | (m.x & 31));
+      const c0 = w.getChunk(m.x >> 5, m.y >> 5, false); if (c0) touch(c0);
+      w.setType(m.x, m.y, m.t, m.d); const c = w.getChunk(m.x >> 5, m.y >> 5, false); if (c && !c0) { c.sh = new Float64Array(1024); c.dg = w.dgen; pending.push(c); }
     } else if (m.cmd === 'stones') {
-      w.setStones(m.x, m.y, m.s); const c = w.getChunk(m.x >> 5, m.y >> 5, false); if (c) mark(c, ((m.y & 31) << 5) | (m.x & 31));
+      const c0 = w.getChunk(m.x >> 5, m.y >> 5, false); if (c0) touch(c0);
+      w.setStones(m.x, m.y, m.s); const c = w.getChunk(m.x >> 5, m.y >> 5, false); if (c && !c0) { c.sh = new Float64Array(1024); c.dg = w.dgen; pending.push(c); }
     } else if (m.cmd === 'stop') {
       running = false; flush(); postMessage({ cmd: 'stopped' });
     }
   };
 }
 
-const ENGINE_SRC = "\nconst CS = 32, N = CS * CS;\nconst MAXS = 1e14;\nconst CLIM = 33554432;\nconst T = { EMPTY: 0, WIRE: 1, KILL: 2, CMP: 3, DUP: 4, WIRE2: 5, SRC: 6, DISP: 7, BTN: 8, RAND: 9, SWITCH: 10, SYM: 11, DIV: 12 };\n\nconst DIRECTIONAL = [0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1];\nconst VARIANT = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1];\n\nconst PUSH = new Uint8Array([0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1]);\nconst DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];\n\nclass Chunk {\n  constructor(cx, cy) {\n    this.cx = cx; this.cy = cy;\n    this.type = new Uint8Array(N);\n    this.dir = new Uint8Array(N);\n    this.st = new Float64Array(N);\n    this.mark = new Uint32Array(N);\n    this.nb = new Array(9).fill(null);\n    this.srcN = 0;\n    this.ver = 0; this.mv = -1; this.mc = 0;\n  }\n  isEmpty() {\n    const t = this.type, s = this.st;\n    for (let i = 0; i < N; i++) if (t[i] !== 0 || s[i] !== 0) return false;\n    return true;\n  }\n}\n\nclass World {\n  constructor() {\n    this.chunks = new Map();\n    this.tick = 0; this.rng = 123456789;\n    this.clrC = []; this.clrI = [];\n    this.curC = []; this.curI = []; this.curGen = 1;\n    this.nextC = []; this.nextI = [];\n    this.srcC = []; this.srcI = []; this.srcDirty = false;\n    this.opC = []; this.opI = new Int32Array(4096); this.opD = new Float64Array(4096); this.opN = 0;\n    this.track = null;\n    this.recOn = true; this.recMax = 1500000; this.recCount = 0; this.hist = []; this.redoN = 0;\n  }\n  dropHist() { if (this.hist.length) { this.hist = []; this.recCount = 0; } this.redoN = 0; }\n\n  getChunk(cx, cy, create) {\n    if (cx < -CLIM || cx >= CLIM || cy < -CLIM || cy >= CLIM) return null;\n    const k = (cx + CLIM) * 67108864 + (cy + CLIM);\n    let c = this.chunks.get(k);\n    if (!c && create) { c = new Chunk(cx, cy); this.chunks.set(k, c); }\n    return c || null;\n  }\n  nbr(c, ox, oy, create) {\n    if (ox === 0 && oy === 0) return c;\n    const j = (oy + 1) * 3 + ox + 1;\n    let n = c.nb[j];\n    if (n) return n;\n    n = this.getChunk(c.cx + ox, c.cy + oy, create);\n    if (n) c.nb[j] = n;\n    return n;\n  }\n  typeAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.type[((y & 31) << 5) | (x & 31)] : 0; }\n  dirAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.dir[((y & 31) << 5) | (x & 31)] : 0; }\n  stAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.st[((y & 31) << 5) | (x & 31)] : 0; }\n\n  touch(c, i) {\n    if (PUSH[c.type[i]] && c.st[i] > 0 && c.mark[i] !== this.curGen) {\n      c.mark[i] = this.curGen; this.curC.push(c); this.curI.push(i);\n    }\n  }\n  setType(x, y, t, d) {\n    this.dropHist();\n    const c = this.getChunk(x >> 5, y >> 5, t !== 0);\n    if (!c) return;\n    const i = ((y & 31) << 5) | (x & 31);\n    const old = c.type[i];\n    if (isSrcT(old)) c.srcN--;\n    if (isSrcT(t)) c.srcN++;\n    if (isSrcT(old) || isSrcT(t)) this.srcDirty = true;\n    c.type[i] = t; c.ver++;\n    c.dir[i] = DIRECTIONAL[t] ? (d & (VARIANT[t] ? 7 : 3)) : 0;\n    this.touch(c, i);\n  }\n  setStones(x, y, s) {\n    this.dropHist();\n    s = Math.max(0, Math.min(MAXS, Math.floor(s)));\n    const c = this.getChunk(x >> 5, y >> 5, s > 0);\n    if (!c) return;\n    const i = ((y & 31) << 5) | (x & 31);\n    c.st[i] = s; c.ver++;\n    this.touch(c, i);\n  }\n  setCell(x, y, t, d, s) { this.setType(x, y, t, d); this.setStones(x, y, s); }\n\n  clear() {\n    this.dropHist();\n    this.chunks.clear(); this.tick = 0;\n    this.curC = []; this.curI = []; this.curGen = 1; this.nextC = []; this.nextI = [];\n    this.srcC = []; this.srcI = []; this.srcDirty = false;\n  }\n\n  pushOp(c, i, v) {\n    let n = this.opN;\n    if (n === this.opI.length) {\n      const a = new Int32Array(n * 2); a.set(this.opI); this.opI = a;\n      const b = new Float64Array(n * 2); b.set(this.opD); this.opD = b;\n    }\n    this.opC[n] = c; this.opI[n] = i; this.opD[n] = v; this.opN = n + 1;\n  }\n  addOp(c, i, dx, dy, v) {\n    let x = (i & 31) + dx, y = (i >> 5) + dy, t = c;\n    if (x < 0 || x > 31 || y < 0 || y > 31) {\n      t = this.nbr(c, x >> 5, y >> 5, true);\n      if (!t) return;\n      x &= 31; y &= 31;\n    }\n    const ti = (y << 5) | x;\n    if (t.type[ti] === 11) return;\n    this.pushOp(t, ti, v);\n  }\n  next() { let x = this.rng | 0; x ^= x << 13; x ^= x >>> 17; x ^= x << 5; this.rng = x; return x >>> 0; }\n  binom(n) {\n    if (n <= 64) { let k = 0; for (let j = 0; j < n; j++) if (this.next() >>> 31) k++; return k; }\n    const u1 = (this.next() + 1) / 4294967297, u2 = this.next() / 4294967296;\n    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(6.283185307179586 * u2);\n    return Math.max(0, Math.min(n, Math.round(n / 2 + z * Math.sqrt(n) / 2)));\n  }\n  readSt(c, i, dx, dy) {\n    let x = (i & 31) + dx, y = (i >> 5) + dy, t = c;\n    if (x < 0 || x > 31 || y < 0 || y > 31) {\n      t = this.nbr(c, x >> 5, y >> 5, false);\n      if (!t) return 0;\n      x &= 31; y &= 31;\n    }\n    const ti = (y << 5) | x;\n    return t.type[ti] === 11 ? 0 : t.st[ti];\n  }\n  rebuildSrc() {\n    this.srcC = []; this.srcI = [];\n    for (const c of this.chunks.values()) {\n      if (c.srcN <= 0) continue;\n      for (let i = 0; i < N; i++) if (isSrcT(c.type[i])) { this.srcC.push(c); this.srcI.push(i); }\n    }\n    this.srcDirty = false;\n  }\n\n  step() { this.redoN = 0; return this.stepCore(); }\n  undoTick() {\n    if (!this.hist.length) return false;\n    const r = this.hist.pop(); this.recCount -= r.c.length;\n    for (let k = r.c.length - 1; k >= 0; k--) { r.c[k].st[r.i[k]] = r.v[k]; r.c[k].ver++; }\n    this.rng = r.rng; this.tick--;\n    this.curC = r.actC; this.curI = r.actI; this.curGen++;\n    for (let k = 0; k < this.curC.length; k++) this.curC[k].mark[this.curI[k]] = this.curGen;\n    this.redoN++; return true;\n  }\n  redoTick() { if (!this.redoN) return false; const n = this.redoN; this.stepCore(); this.redoN = n - 1; return true; }\n  stepCore() {\n    if (this.srcDirty) this.rebuildSrc();\n    const C = this.curC, I = this.curI, n = C.length;\n    const rec = this.recOn ? { c: [], i: [], v: [], actC: C.slice(), actI: I.slice(), rng: this.rng } : null;\n    this.opN = 0;\n    for (let k = 0; k < n; k++) {\n      const c = C[k], i = I[k], s = c.st[i];\n      if (s <= 0) continue;\n      const t = c.type[i], d = c.dir[i];\n      switch (t) {\n        case 1:\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[d], DY[d], s); break;\n        case 8:\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[d], DY[d], 1); break;\n        case 9: {\n          this.pushOp(c, i, -s);\n          const k = this.binom(s);\n          if (k > 0) this.addOp(c, i, DX[d], DY[d], k);\n          break;\n        }\n        case 2:\n          this.pushOp(c, i, -s); break;\n        case 3: {\n          const dd = d & 3, flip = d >> 2;\n          const f = this.readSt(c, i, DX[dd], DY[dd]);\n          const o = ((s > f) !== (flip === 1)) ? (dd + 1) & 3 : (dd + 3) & 3;\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[o], DY[o], s); break;\n        }\n        case 4: {\n          this.pushOp(c, i, -s);\n          const v = s - 1;\n          if (v > 0) {\n            const l = (d + 3) & 3, r = (d + 1) & 3;\n            this.addOp(c, i, DX[l], DY[l], v);\n            this.addOp(c, i, DX[d], DY[d], v);\n            this.addOp(c, i, DX[r], DY[r], v);\n          }\n          break;\n        }\n        case 5:\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[d] * 2, DY[d] * 2, s); break;\n        case 7: {\n          const dd = d & 3; this.pushOp(c, i, -s); this.addOp(c, i, DX[dd], DY[dd], s); break;\n        }\n        case 12: {\n          const dd = d & 3, f = this.readSt(c, i, DX[dd], DY[dd]);\n          const rr = (dd + 1 + (d >> 2) * 2) & 3, ll = (dd + 3 - (d >> 2) * 2) & 3;\n          this.pushOp(c, i, -s);\n          if (f > 0) {\n            const q = Math.floor(s / f), r = s - q * f;\n            if (q > 0) this.addOp(c, i, DX[rr], DY[rr], q);\n            if (r > 0) this.addOp(c, i, DX[ll], DY[ll], r);\n          } else this.addOp(c, i, DX[ll], DY[ll], s);\n          break;\n        }\n      }\n    }\n    const sc = this.srcC, si = this.srcI;\n    for (let k = 0; k < sc.length; k++) {\n      const q = sc[k], qi = si[k];\n      if (q.type[qi] === 6) { const s6 = q.st[qi]; if (s6 > 0) this.pushOp(q, qi, -s6); { const sd = q.dir[qi] & 3; this.addOp(q, qi, DX[sd], DY[sd], 1); } }\n      else if (q.dir[qi] & 4) { const d = q.dir[qi] & 3; this.addOp(q, qi, DX[d], DY[d], 1); }\n    }\n    const ng = this.curGen + 1, nc = this.nextC, ni = this.nextI;\n    nc.length = 0; ni.length = 0;\n    const oc = this.opC, oi = this.opI, od = this.opD, m = this.opN, trk = this.track;\n    for (let k = 0; k < m; k++) {\n      const c = oc[k], i = oi[k], dv = od[k];\n      if (rec) { rec.c.push(c); rec.i.push(i); rec.v.push(c.st[i]); }\n      if (trk) { const dm = c.dm || (c.dm = new Uint8Array(N)); if (!dm[i]) { dm[i] = 1; trk.push(c, i); } }\n      c.st[i] += dv; c.ver++;\n      if (dv > 0 && PUSH[c.type[i]] && c.mark[i] !== ng) { c.mark[i] = ng; nc.push(c); ni.push(i); }\n    }\n    for (let k = 0; k < m; k++) {\n      const c = oc[k], i = oi[k];\n      if (c.st[i] > MAXS) c.st[i] = MAXS;\n      oc[k] = null;\n    }\n    this.curC = nc; this.curI = ni; this.nextC = C; this.nextI = I; this.curGen = ng;\n    this.tick++;\n    if (rec) {\n      this.hist.push(rec); this.recCount += rec.c.length;\n      let drop = 0;\n      while (this.recCount > this.recMax && drop < this.hist.length - 1) this.recCount -= this.hist[drop++].c.length;\n      if (drop) this.hist.splice(0, drop);\n    }\n    return m;\n  }\n\n  prune() {\n    for (const [k, c] of this.chunks) if (c.isEmpty()) this.chunks.delete(k);\n    for (const c of this.chunks.values()) c.nb.fill(null);\n  }\n  toData(share) {\n    this.prune();\n    const chunks = [];\n    for (const c of this.chunks.values()) {\n      chunks.push(share ? { cx: c.cx, cy: c.cy, type: c.type, dir: c.dir, st: c.st } : { cx: c.cx, cy: c.cy, type: c.type.slice(), dir: c.dir.slice(), st: c.st.slice() });\n    }\n    return { chunks, tick: this.tick, rng: this.rng };\n  }\n  fromData(data) {\n    this.clear();\n    this.tick = data.tick || 0; this.rng = data.rng || 123456789;\n    for (const d of data.chunks) {\n      const c = this.getChunk(d.cx, d.cy, true);\n      c.type.set(d.type); c.dir.set(d.dir); c.st.set(d.st);\n      for (let i = 0; i < N; i++) {\n        if (isSrcT(c.type[i])) c.srcN++;\n        if (c.st[i] > MAXS) c.st[i] = MAXS;\n      }\n    }\n    this.srcDirty = true;\n    for (const c of this.chunks.values()) for (let i = 0; i < N; i++) this.touch(c, i);\n  }\n  cellCount() {\n    let n = 0;\n    for (const c of this.chunks.values()) for (let i = 0; i < N; i++) if (c.type[i] !== 0 || c.st[i] > 0) n++;\n    return n;\n  }\n}\nfunction isSrcT(t) { return t === 6 || t === 10; }\n\n";
+const ENGINE_SRC = "\nconst CS = 32, N = CS * CS;\nconst MAXS = 1e14;\nconst CLIM = 33554432;\nconst T = { EMPTY: 0, WIRE: 1, KILL: 2, CMP: 3, DUP: 4, WIRE2: 5, SRC: 6, DISP: 7, BTN: 8, RAND: 9, SWITCH: 10, SYM: 11, DIV: 12 };\n\nconst DIRECTIONAL = [0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1];\nconst VARIANT = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1];\n\nconst PUSH = new Uint8Array([0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1]);\nconst DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];\n\nclass Chunk {\n  constructor(cx, cy) {\n    this.cx = cx; this.cy = cy;\n    this.type = new Uint8Array(N);\n    this.dir = new Uint8Array(N);\n    this.st = new Float64Array(N);\n    this.mark = new Uint32Array(N);\n    this.nb = new Array(9).fill(null);\n    this.srcN = 0;\n    this.ver = 0; this.mv = -1; this.mc = 0; this.dg = 0; this.sh = null;\n  }\n  isEmpty() {\n    const t = this.type, s = this.st;\n    for (let i = 0; i < N; i++) if (t[i] !== 0 || s[i] !== 0) return false;\n    return true;\n  }\n}\n\nclass World {\n  constructor() {\n    this.chunks = new Map();\n    this.tick = 0; this.rng = 123456789;\n    this.clrC = []; this.clrI = [];\n    this.curC = []; this.curI = []; this.curGen = 1;\n    this.nextC = []; this.nextI = [];\n    this.srcC = []; this.srcI = []; this.srcDirty = false;\n    this.opC = []; this.opI = new Int32Array(4096); this.opD = new Float64Array(4096); this.opN = 0;\n    this.track = null; this.dgen = 1; this.mods = 0; this.vc = 0;\n    this.recOn = true; this.recMax = 1500000; this.recCount = 0; this.hist = []; this.redoN = 0;\n  }\n  dropHist() { if (this.hist.length) { this.hist = []; this.recCount = 0; } this.redoN = 0; }\n\n  getChunk(cx, cy, create) {\n    if (cx < -CLIM || cx >= CLIM || cy < -CLIM || cy >= CLIM) return null;\n    const k = (cx + CLIM) * 67108864 + (cy + CLIM);\n    let c = this.chunks.get(k);\n    if (!c && create) { c = new Chunk(cx, cy); this.chunks.set(k, c); }\n    return c || null;\n  }\n  nbr(c, ox, oy, create) {\n    if (ox === 0 && oy === 0) return c;\n    const j = (oy + 1) * 3 + ox + 1;\n    let n = c.nb[j];\n    if (n) return n;\n    n = this.getChunk(c.cx + ox, c.cy + oy, create);\n    if (n) c.nb[j] = n;\n    return n;\n  }\n  typeAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.type[((y & 31) << 5) | (x & 31)] : 0; }\n  dirAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.dir[((y & 31) << 5) | (x & 31)] : 0; }\n  stAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.st[((y & 31) << 5) | (x & 31)] : 0; }\n\n  touch(c, i) {\n    if (PUSH[c.type[i]] && c.st[i] > 0 && c.mark[i] !== this.curGen) {\n      c.mark[i] = this.curGen; this.curC.push(c); this.curI.push(i);\n    }\n  }\n  setType(x, y, t, d) {\n    this.dropHist();\n    const c = this.getChunk(x >> 5, y >> 5, t !== 0);\n    if (!c) return;\n    const i = ((y & 31) << 5) | (x & 31);\n    const old = c.type[i];\n    if (isSrcT(old)) c.srcN--;\n    if (isSrcT(t)) c.srcN++;\n    if (isSrcT(old) || isSrcT(t)) this.srcDirty = true;\n    c.type[i] = t; c.ver = ++this.vc; this.mods++;\n    c.dir[i] = DIRECTIONAL[t] ? (d & (VARIANT[t] ? 7 : 3)) : 0;\n    this.touch(c, i);\n  }\n  setStones(x, y, s) {\n    this.dropHist();\n    s = Math.max(0, Math.min(MAXS, Math.floor(s)));\n    const c = this.getChunk(x >> 5, y >> 5, s > 0);\n    if (!c) return;\n    const i = ((y & 31) << 5) | (x & 31);\n    c.st[i] = s; c.ver = ++this.vc; this.mods++;\n    this.touch(c, i);\n  }\n  setCell(x, y, t, d, s) { this.setType(x, y, t, d); this.setStones(x, y, s); }\n\n  clear() {\n    this.dropHist();\n    this.chunks.clear(); this.tick = 0; this.mods++;\n    this.curC = []; this.curI = []; this.curGen = 1; this.nextC = []; this.nextI = [];\n    this.srcC = []; this.srcI = []; this.srcDirty = false;\n  }\n\n  pushOp(c, i, v) {\n    const n = this.opN;\n    this.opC[n] = c; this.opI[n] = i; this.opD[n] = v; this.opN = n + 1;\n  }\n  addOp(c, i, dx, dy, v) {\n    let x = (i & 31) + dx, y = (i >> 5) + dy, t = c;\n    if (x < 0 || x > 31 || y < 0 || y > 31) {\n      t = this.nbr(c, x >> 5, y >> 5, true);\n      if (!t) return;\n      x &= 31; y &= 31;\n    }\n    const ti = (y << 5) | x;\n    if (t.type[ti] === 11) return;\n    this.pushOp(t, ti, v);\n  }\n  next() { let x = this.rng | 0; x ^= x << 13; x ^= x >>> 17; x ^= x << 5; this.rng = x; return x >>> 0; }\n  binom(n) {\n    if (n <= 64) { let k = 0; for (let j = 0; j < n; j++) if (this.next() >>> 31) k++; return k; }\n    const u1 = (this.next() + 1) / 4294967297, u2 = this.next() / 4294967296;\n    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(6.283185307179586 * u2);\n    return Math.max(0, Math.min(n, Math.round(n / 2 + z * Math.sqrt(n) / 2)));\n  }\n  readSt(c, i, dx, dy) {\n    let x = (i & 31) + dx, y = (i >> 5) + dy, t = c;\n    if (x < 0 || x > 31 || y < 0 || y > 31) {\n      t = this.nbr(c, x >> 5, y >> 5, false);\n      if (!t) return 0;\n      x &= 31; y &= 31;\n    }\n    const ti = (y << 5) | x;\n    return t.type[ti] === 11 ? 0 : t.st[ti];\n  }\n  rebuildSrc() {\n    this.srcC = []; this.srcI = [];\n    for (const c of this.chunks.values()) {\n      if (c.srcN <= 0) continue;\n      for (let i = 0; i < N; i++) if (isSrcT(c.type[i])) { this.srcC.push(c); this.srcI.push(i); }\n    }\n    this.srcDirty = false;\n  }\n\n  step() { this.redoN = 0; return this.stepCore(); }\n  undoTick() {\n    if (!this.hist.length) return false;\n    const r = this.hist.pop(); this.recCount -= r.c.length;\n    for (let k = r.c.length - 1; k >= 0; k--) { r.c[k].st[r.i[k]] = r.v[k]; r.c[k].ver = ++this.vc; }\n    this.rng = r.rng; this.tick--; this.mods++;\n    this.curC = r.actC; this.curI = r.actI; this.curGen++;\n    for (let k = 0; k < this.curC.length; k++) this.curC[k].mark[this.curI[k]] = this.curGen;\n    this.redoN++; return true;\n  }\n  redoTick() { if (!this.redoN) return false; const n = this.redoN; this.stepCore(); this.redoN = n - 1; return true; }\n  stepCore() {\n    if (this.srcDirty) this.rebuildSrc();\n    const C = this.curC, I = this.curI, n = C.length;\n    const rec = this.recOn ? { c: null, i: null, v: null, actC: C.slice(), actI: I.slice(), rng: this.rng } : null;\n    const need = n * 4 + this.srcC.length * 2 + 16;\n    if (this.opI.length < need) { const sz = Math.max(need, this.opI.length * 2); this.opI = new Int32Array(sz); this.opD = new Float64Array(sz); }\n    this.opN = 0;\n    for (let k = 0; k < n; k++) {\n      const c = C[k], i = I[k], s = c.st[i];\n      if (s <= 0) continue;\n      const t = c.type[i], d = c.dir[i];\n      switch (t) {\n        case 1:\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[d], DY[d], s); break;\n        case 8:\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[d], DY[d], 1); break;\n        case 9: {\n          this.pushOp(c, i, -s);\n          const k = this.binom(s);\n          if (k > 0) this.addOp(c, i, DX[d], DY[d], k);\n          break;\n        }\n        case 2:\n          this.pushOp(c, i, -s); break;\n        case 3: {\n          const dd = d & 3, flip = d >> 2;\n          const f = this.readSt(c, i, DX[dd], DY[dd]);\n          const o = ((s > f) !== (flip === 1)) ? (dd + 1) & 3 : (dd + 3) & 3;\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[o], DY[o], s); break;\n        }\n        case 4: {\n          this.pushOp(c, i, -s);\n          const v = s - 1;\n          if (v > 0) {\n            const l = (d + 3) & 3, r = (d + 1) & 3;\n            this.addOp(c, i, DX[l], DY[l], v);\n            this.addOp(c, i, DX[d], DY[d], v);\n            this.addOp(c, i, DX[r], DY[r], v);\n          }\n          break;\n        }\n        case 5:\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[d] * 2, DY[d] * 2, s); break;\n        case 7: {\n          const dd = d & 3; this.pushOp(c, i, -s); this.addOp(c, i, DX[dd], DY[dd], s); break;\n        }\n        case 12: {\n          const dd = d & 3, f = this.readSt(c, i, DX[dd], DY[dd]);\n          const rr = (dd + 1 + (d >> 2) * 2) & 3, ll = (dd + 3 - (d >> 2) * 2) & 3;\n          this.pushOp(c, i, -s);\n          if (f > 0) {\n            const q = Math.floor(s / f), r = s - q * f;\n            if (q > 0) this.addOp(c, i, DX[rr], DY[rr], q);\n            if (r > 0) this.addOp(c, i, DX[ll], DY[ll], r);\n          } else this.addOp(c, i, DX[ll], DY[ll], s);\n          break;\n        }\n      }\n    }\n    const sc = this.srcC, si = this.srcI;\n    for (let k = 0; k < sc.length; k++) {\n      const q = sc[k], qi = si[k];\n      if (q.type[qi] === 6) { const s6 = q.st[qi]; if (s6 > 0) this.pushOp(q, qi, -s6); { const sd = q.dir[qi] & 3; this.addOp(q, qi, DX[sd], DY[sd], 1); } }\n      else if (q.dir[qi] & 4) { const d = q.dir[qi] & 3; this.addOp(q, qi, DX[d], DY[d], 1); }\n    }\n    const ng = this.curGen + 1, nc = this.nextC, ni = this.nextI;\n    nc.length = 0; ni.length = 0;\n    const oc = this.opC, oi = this.opI, od = this.opD, m = this.opN, trk = this.track, dg = this.dgen;\n    let rc = null, ri = null, rv = null;\n    if (rec) { rc = new Array(m); ri = oi.slice(0, m); rv = new Float64Array(m); rec.c = rc; rec.i = ri; rec.v = rv; }\n    const vc = ++this.vc, ov = [];\n    for (let k = 0; k < m; k++) {\n      const c = oc[k], i = oi[k], dv = od[k], st = c.st;\n      if (rec) { rc[k] = c; rv[k] = st[i]; }\n      if (trk && c.dg !== dg) { c.dg = dg; (c.sh || (c.sh = new Float64Array(N))).set(st); trk.push(c); }\n      const v = st[i] + dv; st[i] = v; c.ver = vc;\n      if (v > MAXS) ov.push(c, i);\n      if (dv > 0 && PUSH[c.type[i]] && c.mark[i] !== ng) { c.mark[i] = ng; nc.push(c); ni.push(i); }\n    }\n    for (let k = 0; k < ov.length; k += 2) if (ov[k].st[ov[k + 1]] > MAXS) ov[k].st[ov[k + 1]] = MAXS;\n    this.curC = nc; this.curI = ni; this.nextC = C; this.nextI = I; this.curGen = ng;\n    this.tick++; this.mods++;\n    if (rec) {\n      this.hist.push(rec); this.recCount += rec.c.length;\n      let drop = 0;\n      while (this.recCount > this.recMax && drop < this.hist.length - 1) this.recCount -= this.hist[drop++].c.length;\n      if (drop) this.hist.splice(0, drop);\n    }\n    return m;\n  }\n\n  prune() {\n    for (const [k, c] of this.chunks) if (c.isEmpty()) this.chunks.delete(k);\n    for (const c of this.chunks.values()) c.nb.fill(null);\n  }\n  toData(share) {\n    this.prune();\n    const chunks = [];\n    for (const c of this.chunks.values()) {\n      chunks.push(share ? { cx: c.cx, cy: c.cy, type: c.type, dir: c.dir, st: c.st } : { cx: c.cx, cy: c.cy, type: c.type.slice(), dir: c.dir.slice(), st: c.st.slice() });\n    }\n    return { chunks, tick: this.tick, rng: this.rng };\n  }\n  fromData(data) {\n    this.clear();\n    this.tick = data.tick || 0; this.rng = data.rng || 123456789;\n    for (const d of data.chunks) {\n      const c = this.getChunk(d.cx, d.cy, true);\n      c.type.set(d.type); c.dir.set(d.dir); c.st.set(d.st);\n      for (let i = 0; i < N; i++) {\n        if (isSrcT(c.type[i])) c.srcN++;\n        if (c.st[i] > MAXS) c.st[i] = MAXS;\n      }\n    }\n    this.srcDirty = true;\n    for (const c of this.chunks.values()) for (let i = 0; i < N; i++) this.touch(c, i);\n  }\n  cellCount() {\n    let n = 0;\n    for (const c of this.chunks.values()) for (let i = 0; i < N; i++) if (c.type[i] !== 0 || c.st[i] > 0) n++;\n    return n;\n  }\n}\nfunction isSrcT(t) { return t === 6 || t === 10; }\n\n";
 
 
-const APP_VERSION = 'Pebble Automaton 1.0.0', APP_BUILD = '2026-11-24';
+const APP_VERSION = 'Pebble Automaton 1.0.0', APP_BUILD = '2026-11-26';
 
 const ERRLOG = [];
 function noteError(msg, where) { ERRLOG.push({ t: new Date().toISOString(), msg: String(msg).slice(0, 400), where: where || '' }); if (ERRLOG.length > 5) ERRLOG.shift(); }
@@ -9238,7 +9304,7 @@ function cfgIoBind() {
 }
 const BAR = 62, MBAR = 58;
 function effectiveTb() {
-  if (document.body.classList.contains('mobile')) return Cfg.tbPos === 't' ? 't' : 'b';
+  if (document.body.classList.contains('mobile')) return document.body.classList.contains('short') ? 'r' : Cfg.tbPos === 't' ? 't' : 'b';
   return Cfg.tbPos;
 }
 const POS_RECT = {
@@ -9280,7 +9346,7 @@ function applyLayout() {
   const hit = el => { const r = el.getBoundingClientRect(); return r.width && r.left < pal.right + 6 && r.right > pal.left - 6 && r.top < pal.bottom + 6 && r.bottom > pal.top - 6; };
   const place = (el, c, gap, base) => {
     put(el, c, gap, base, 0, 0);
-    if (hit(el)) { const side = tb === 'l' || tb === 'r'; put(el, c, gap, base, side ? BAR : 0, side ? 0 : BAR); }
+    if (hit(el) || (tb === 'r' && c[1] === 'r')) { const side = tb === 'l' || tb === 'r'; put(el, c, gap, base, side ? BAR : 0, side ? 0 : BAR); }
   };
   const rb = $('radBtn'); if (mob) { place(rb, 'br', true, 8); y.br += 60; }
   const mini = $('mini'), mh = mob ? 80 : 112;
@@ -9371,9 +9437,9 @@ function openGuide() {
   openDlg('guideDlg');
 }
 
-const EXP = { data: null, items: null, name: '', latin: false, desc: '', noDesc: false };
+const EXP = { data: null, items: null, name: '', latin: false, desc: '', noDesc: false, view: null, anchor: false };
 const expDesc = () => EXP.noDesc ? '' : EXP.desc;
-const expCode = fmt => EXP.items ? exportBundle(EXP.items, fmt) : exportWorld(EXP.data, EXP.name, fmt, expDesc());
+const expCode = fmt => EXP.items ? exportBundle(EXP.items, fmt) : exportWorld(EXP.data, EXP.name, fmt, expDesc(), EXP.anchor ? EXP.view : null);
 async function renderExport() {
   $('fmtCjk').classList.toggle('on', !EXP.latin); $('fmtLatin').classList.toggle('on', EXP.latin);
   $('exportText').value = S().preparing; $('exportInfo').textContent = ''; $('exportLink').disabled = true;
@@ -9385,11 +9451,12 @@ async function renderExport() {
   } catch (err) { $('exportText').value = ''; $('exportInfo').textContent = err.message; }
 }
 function exportBundleDialog(items, name) {
-  Object.assign(EXP, { data: null, items, name, desc: '', noDesc: false });
+  Object.assign(EXP, { data: null, items, name, desc: '', noDesc: false, view: null, anchor: false }); $('expAnchorRow').hidden = true;
   $('exportTitle').textContent = name; $('expNoDesc').checked = false; $('expDescRow').hidden = true;
   openDlg('exportDlg'); renderExport();
 }
-function exportDialog(data, name, desc) {
+function exportDialog(data, name, desc, view) {
+  EXP.view = view || null; EXP.anchor = false; $('expAnchor').checked = false; $('expAnchorRow').hidden = !view;
   EXP.data = data; EXP.items = null; EXP.name = name; EXP.desc = desc || ''; EXP.noDesc = false;
   $('exportTitle').textContent = S().exportTitle; $('expNoDesc').checked = false; $('expDescRow').hidden = !EXP.desc;
   openDlg('exportDlg'); renderExport();
@@ -9437,7 +9504,7 @@ async function offerImport(text, title) {
     const w = new World(); w.fromData(r.data);
     if ((r.desc || '').startsWith(UPZ.MARK)) { const pz = puzzleFromShared(r.name, w, r.desc); linkPending = { puz: pz }; box.appendChild(mk('div', 'nm', pz.ru[0])); if (pz.ru[1]) box.appendChild(mk('div', 'note', pz.ru[1])); $('linkOpen').hidden = false; $('linkOpen').textContent = S().puzAdd; openDlg('linkDlg'); return; }
     $('linkOpen').textContent = S().linkOpen;
-    linkPending = { name: r.name || S().newWorld, w, desc: r.desc || '' };
+    linkPending = { name: r.name || S().newWorld, w, desc: r.desc || '', view: r.view };
     box.appendChild(mk('div', 'nm', linkPending.name));
     if (linkPending.desc) box.appendChild(mk('div', 'note', linkPending.desc));
     box.appendChild(mk('div', 'note', S().cells(w.cellCount())));
@@ -9523,11 +9590,11 @@ function newMeta(name, desc) {
   const now = Date.now();
   return { id: Store.newId(), name: name || S().newWorld, desc: desc || '', created: now, modified: now, cells: 0, view: { x: 0.5, y: 0.5, z: 40 } };
 }
-async function createAndOpen(name, world, desc) {
+async function createAndOpen(name, world, desc, view) {
   const meta = newMeta(name, desc);
   meta.cells = world.cellCount(); meta.thumb = makeThumb(world);
   await Store.save(meta, world.toData(true));
-  openEditor(world, meta, meta.view);
+  openEditor(world, meta, view || meta.view);
 }
 async function openSaved(id) {
   const rec = await Store.load(id);
@@ -9871,7 +9938,7 @@ async function boot() {
   $('menuResume').onclick = closeTopDialog;
   $('menuName').addEventListener('input', () => { if (E.meta) { E.meta.name = $('menuName').value.trim() || S().newWorld; $('worldTitle').textContent = E.meta.name; E.dirtySave = true; } });
   $('menuDesc').addEventListener('input', () => { if (E.meta) { E.meta.desc = $('menuDesc').value.trim(); E.dirtySave = true; } });
-  $('menuExport').onclick = () => { $('menuDlg').hidden = true; exportDialog(E.world.toData(), E.meta.name, E.meta.desc); };
+  $('menuExport').onclick = () => { $('menuDlg').hidden = true; exportDialog(E.world.toData(), E.meta.name, E.meta.desc, { x: E.view.x, y: E.view.y, z: E.view.z }); };
   $('foSave').onclick = saveFolderEdit; $('foDel').onclick = deleteFolder; $('foExp').onclick = exportFolder;
   $('menuSettings').onclick = openSettings; $('menuMain').onclick = goMenu;
 
@@ -9928,11 +9995,12 @@ async function boot() {
 
   $('exportDownload').onclick = () => downloadExport(false); $('exportBin').onclick = () => downloadExport(true); $('exportLink').onclick = copyShareLink;
   $('linkOpen').onclick = async () => { if (!linkPending) return; $('linkDlg').hidden = true; const p = linkPending; linkPending = null; if (p.bundle) { await importBundle(p.bundle); return; }
-    if (p.puz) { const a = UPZ.load(); a.push(p.puz); UPZ.save(a); toast(S().puzAdded); renderPuzzles(); return; } await createAndOpen(p.name, p.w, p.desc); };
+    if (p.puz) { const a = UPZ.load(); a.push(p.puz); UPZ.save(a); toast(S().puzAdded); renderPuzzles(); return; } await createAndOpen(p.name, p.w, p.desc, p.view ? { x: p.view.x, y: p.view.y, z: Math.max(MINZ, Math.min(140, p.view.z)) } : null); };
   window.addEventListener('hashchange', handleHash); handleHash();
   $('fmtCjk').onclick = () => { EXP.latin = false; renderExport(); };
   $('fmtLatin').onclick = () => { EXP.latin = true; renderExport(); };
   $('exportCopy').onclick = () => copyText('exportText');
+  $('expAnchor').onchange = e => { EXP.anchor = e.target.checked; renderExport(); };
   $('expNoDesc').onchange = e => { EXP.noDesc = e.target.checked; renderExport(); };
   document.querySelectorAll('[data-close]').forEach(b => { b.onclick = () => { $(b.dataset.close).hidden = true; if (!$('editor').hidden) cv.focus(); }; });
   window.addEventListener('keydown', e => { if (e.key === 'Escape' && $('editor').hidden && anyDialog()) closeTopDialog(); });
