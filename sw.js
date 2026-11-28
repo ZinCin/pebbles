@@ -1,4 +1,4 @@
-const CACHE = 'pebble-Pebble-Automaton-1.0.0-2026-11-26';
+const CACHE = 'pebble-Pebble-Automaton-1.0.0-2026-11-27';
 const CORE = ['./', 'index.html', 'manifest.webmanifest', 'links.txt', 'library/index.json', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {

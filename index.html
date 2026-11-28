@@ -334,6 +334,8 @@ input[type="range"]::-moz-range-thumb { width: 20px; height: 20px; border-radius
 #drop div { border: 3px dashed #fff; border-radius: 16px; padding: 40px 60px; }
 #tip, #ctip { position: fixed; z-index: 30; max-width: 280px; background: var(--panel); color: var(--ink); border-radius: 8px; padding: 8px 10px; font-size: 14px; line-height: 1.35; pointer-events: none; }
 #ctip { padding: 4px 8px; font-weight: 800; font-size: 13px; }
+#ctip { overflow-wrap: anywhere; }
+#ctip.big { color: #f5c400; }
 #tip .tt { font-weight: 800; margin-bottom: 2px; }
 #tip kbd { background: transparent; color: var(--ink); opacity: 0.8; }
 #numBox { position: absolute; left: 50%; top: 18%; transform: translateX(-50%); z-index: 6; display: flex; align-items: center; gap: 8px; background: var(--panel); border-radius: 10px; padding: 10px 40px 10px 10px; max-width: calc(100% - 16px); flex-wrap: wrap; user-select: text; }
@@ -797,7 +799,7 @@ body.mobile .row { flex-wrap: wrap; }
 'use strict';
 
 const CS = 32, N = CS * CS;
-const MAXS = 1e14;
+const MAXS = 1e14, MAXSB = 100000000000000n;
 const CLIM = 33554432;
 const T = { EMPTY: 0, WIRE: 1, KILL: 2, CMP: 3, DUP: 4, WIRE2: 5, SRC: 6, DISP: 7, BTN: 8, RAND: 9, SWITCH: 10, SYM: 11, DIV: 12 };
 
@@ -807,6 +809,16 @@ const VARIANT = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1];
 const PUSH = new Uint8Array([0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1]);
 const DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];
 
+if (typeof BigInt.prototype.toJSON !== 'function') BigInt.prototype.toJSON = function () { return this.toString(); };
+function normSt(v) {
+  if (typeof v === 'string') { try { v = BigInt(v); } catch (e) { return 0; } }
+  if (typeof v === 'bigint') return v < 0n ? 0 : v <= MAXSB ? Number(v) : v;
+  v = Math.floor(v);
+  if (!(v > 0)) return 0;
+  return v <= MAXS ? v : BigInt(Math.min(v, Number.MAX_VALUE));
+}
+function addSt(a, b) { return normSt(typeof a === 'bigint' || typeof b === 'bigint' ? BigInt(a) + BigInt(b) : a + b); }
+function stOf(c, i) { const v = c.st[i]; return v === Infinity ? c.bg.get(i) : v; }
 class Chunk {
   constructor(cx, cy) {
     this.cx = cx; this.cy = cy;
@@ -815,7 +827,7 @@ class Chunk {
     this.st = new Float64Array(N);
     this.mark = new Uint32Array(N);
     this.nb = new Array(9).fill(null);
-    this.srcN = 0;
+    this.srcN = 0; this.bg = null;
     this.ver = 0; this.mv = -1; this.mc = 0; this.dg = 0; this.sh = null;
   }
   isEmpty() {
@@ -834,6 +846,7 @@ class World {
     this.nextC = []; this.nextI = [];
     this.srcC = []; this.srcI = []; this.srcDirty = false;
     this.opC = []; this.opI = new Int32Array(4096); this.opD = new Float64Array(4096); this.opN = 0;
+    this.bigN = 0; this.noBig = false; this.ovf = false; this.bopC = []; this.bopI = []; this.bopV = []; this.bopN = 0;
     this.track = null; this.dgen = 1; this.mods = 0; this.vc = 0;
     this.recOn = true; this.recMax = 1500000; this.recCount = 0; this.hist = []; this.redoN = 0;
   }
@@ -858,6 +871,21 @@ class World {
   typeAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.type[((y & 31) << 5) | (x & 31)] : 0; }
   dirAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.dir[((y & 31) << 5) | (x & 31)] : 0; }
   stAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.st[((y & 31) << 5) | (x & 31)] : 0; }
+  valAt(x, y) {
+    const c = this.getChunk(x >> 5, y >> 5, false); if (!c) return 0;
+    const i = ((y & 31) << 5) | (x & 31), v = c.st[i];
+    return v === Infinity ? c.bg.get(i) : v;
+  }
+  putBig(c, i, b) {
+    if (b > MAXSB) {
+      if (c.st[i] !== Infinity) { this.bigN++; c.st[i] = Infinity; }
+      if (!c.bg) c.bg = new Map();
+      c.bg.set(i, b);
+    } else {
+      if (c.st[i] === Infinity) { this.bigN--; c.bg.delete(i); }
+      c.st[i] = Number(b);
+    }
+  }
 
   touch(c, i) {
     if (PUSH[c.type[i]] && c.st[i] > 0 && c.mark[i] !== this.curGen) {
@@ -879,18 +907,22 @@ class World {
   }
   setStones(x, y, s) {
     this.dropHist();
-    s = Math.max(0, Math.min(MAXS, Math.floor(s)));
-    const c = this.getChunk(x >> 5, y >> 5, s > 0);
+    let big = null;
+    s = normSt(s);
+    if (typeof s === 'bigint') { big = s; s = 0; }
+    const c = this.getChunk(x >> 5, y >> 5, big !== null || s > 0);
     if (!c) return;
     const i = ((y & 31) << 5) | (x & 31);
-    c.st[i] = s; c.ver = ++this.vc; this.mods++;
+    if (big !== null) this.putBig(c, i, big);
+    else { if (c.st[i] === Infinity) { this.bigN--; c.bg.delete(i); } c.st[i] = s; }
+    c.ver = ++this.vc; this.mods++;
     this.touch(c, i);
   }
   setCell(x, y, t, d, s) { this.setType(x, y, t, d); this.setStones(x, y, s); }
 
   clear() {
     this.dropHist();
-    this.chunks.clear(); this.tick = 0; this.mods++;
+    this.chunks.clear(); this.tick = 0; this.mods++; this.bigN = 0;
     this.curC = []; this.curI = []; this.curGen = 1; this.nextC = []; this.nextI = [];
     this.srcC = []; this.srcI = []; this.srcDirty = false;
   }
@@ -909,6 +941,90 @@ class World {
     const ti = (y << 5) | x;
     if (t.type[ti] === 11) return;
     this.pushOp(t, ti, v);
+  }
+  addBig(c, i, dx, dy, v) {
+    if (v === 0n) return;
+    let x = (i & 31) + dx, y = (i >> 5) + dy, t = c;
+    if (x < 0 || x > 31 || y < 0 || y > 31) {
+      t = this.nbr(c, x >> 5, y >> 5, true);
+      if (!t) return;
+      x &= 31; y &= 31;
+    }
+    const ti = (y << 5) | x;
+    if (t.type[ti] === 11) return;
+    const n = this.bopN;
+    this.bopC[n] = t; this.bopI[n] = ti; this.bopV[n] = v; this.bopN = n + 1;
+  }
+  pushBig(c, i, v) { const n = this.bopN; this.bopC[n] = c; this.bopI[n] = i; this.bopV[n] = v; this.bopN = n + 1; }
+  readBig(c, i, dx, dy) {
+    let x = (i & 31) + dx, y = (i >> 5) + dy, t = c;
+    if (x < 0 || x > 31 || y < 0 || y > 31) {
+      t = this.nbr(c, x >> 5, y >> 5, false);
+      if (!t) return 0;
+      x &= 31; y &= 31;
+    }
+    const ti = (y << 5) | x;
+    if (t.type[ti] === 11) return 0;
+    const v = t.st[ti];
+    return v === Infinity ? t.bg.get(ti) : v;
+  }
+  isqrtB(n) {
+    if (n < 2n) return n;
+    let x = 1n << BigInt((n.toString(2).length + 1) >> 1);
+    for (;;) { const y = (x + n / x) >> 1n; if (y >= x) return x; x = y; }
+  }
+  binomB(n) {
+    const u1 = (this.next() + 1) / 4294967297, u2 = this.next() / 4294967296;
+    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(6.283185307179586 * u2);
+    const zz = BigInt(Math.round(z * 1000000));
+    let k = n / 2n + zz * this.isqrtB(n) / 2000000n;
+    if (k < 0n) k = 0n; if (k > n) k = n;
+    return k;
+  }
+  bigCell(c, i, t, d) {
+    const b = c.bg.get(i);
+    switch (t) {
+      case 1: this.pushBig(c, i, -b); this.addBig(c, i, DX[d], DY[d], b); break;
+      case 8: this.pushBig(c, i, -b); this.addOp(c, i, DX[d], DY[d], 1); break;
+      case 9: { this.pushBig(c, i, -b); this.addBig(c, i, DX[d], DY[d], this.binomB(b)); break; }
+      case 2: this.pushBig(c, i, -b); break;
+      case 3: {
+        const dd = d & 3, flip = d >> 2;
+        const f = this.readBig(c, i, DX[dd], DY[dd]);
+        const o = ((b > f) !== (flip === 1)) ? (dd + 1) & 3 : (dd + 3) & 3;
+        this.pushBig(c, i, -b); this.addBig(c, i, DX[o], DY[o], b); break;
+      }
+      case 4: {
+        this.pushBig(c, i, -b);
+        const v = b - 1n, l = (d + 3) & 3, r = (d + 1) & 3;
+        this.addBig(c, i, DX[l], DY[l], v); this.addBig(c, i, DX[d], DY[d], v); this.addBig(c, i, DX[r], DY[r], v);
+        break;
+      }
+      case 5: this.pushBig(c, i, -b); this.addBig(c, i, DX[d] * 2, DY[d] * 2, b); break;
+      case 7: { const dd = d & 3; this.pushBig(c, i, -b); this.addBig(c, i, DX[dd], DY[dd], b); break; }
+      case 12: {
+        const dd = d & 3, f = this.readBig(c, i, DX[dd], DY[dd]);
+        const rr = (dd + 1 + (d >> 2) * 2) & 3, ll = (dd + 3 - (d >> 2) * 2) & 3;
+        this.pushBig(c, i, -b);
+        if (f > 0) {
+          const fb = typeof f === 'bigint' ? f : BigInt(f), q = b / fb, r = b - q * fb;
+          this.addBig(c, i, DX[rr], DY[rr], q); this.addBig(c, i, DX[ll], DY[ll], r);
+        } else this.addBig(c, i, DX[ll], DY[ll], b);
+        break;
+      }
+    }
+  }
+  applyBig(ng, nc, ni, vc) {
+    const oc = this.bopC, oi = this.bopI, ov = this.bopV, m = this.bopN;
+    for (let k = 0; k < m; k++) {
+      const c = oc[k], i = oi[k], v = ov[k];
+      const o = c.st[i];
+      this.putBig(c, i, (o === Infinity ? c.bg.get(i) : BigInt(o)) + v);
+      c.ver = vc;
+      if (v > 0n && PUSH[c.type[i]] && c.mark[i] !== ng) { c.mark[i] = ng; nc.push(c); ni.push(i); }
+    }
+    for (let k = 0; k < m; k++) { oc[k] = null; ov[k] = 0n; }
+    this.bopN = 0;
   }
   next() { let x = this.rng | 0; x ^= x << 13; x ^= x >>> 17; x ^= x << 5; this.rng = x; return x >>> 0; }
   binom(n) {
@@ -950,7 +1066,7 @@ class World {
   stepCore() {
     if (this.srcDirty) this.rebuildSrc();
     const C = this.curC, I = this.curI, n = C.length;
-    const rec = this.recOn ? { c: null, i: null, v: null, actC: C.slice(), actI: I.slice(), rng: this.rng } : null;
+    const rec = this.recOn && this.bigN === 0 ? { c: null, i: null, v: null, actC: C.slice(), actI: I.slice(), rng: this.rng } : null;
     const need = n * 4 + this.srcC.length * 2 + 16;
     if (this.opI.length < need) { const sz = Math.max(need, this.opI.length * 2); this.opI = new Int32Array(sz); this.opD = new Float64Array(sz); }
     this.opN = 0;
@@ -958,6 +1074,7 @@ class World {
       const c = C[k], i = I[k], s = c.st[i];
       if (s <= 0) continue;
       const t = c.type[i], d = c.dir[i];
+      if (s === Infinity) { this.bigCell(c, i, t, d); continue; }
       switch (t) {
         case 1:
           this.pushOp(c, i, -s); this.addOp(c, i, DX[d], DY[d], s); break;
@@ -997,7 +1114,7 @@ class World {
           const dd = d & 3, f = this.readSt(c, i, DX[dd], DY[dd]);
           const rr = (dd + 1 + (d >> 2) * 2) & 3, ll = (dd + 3 - (d >> 2) * 2) & 3;
           this.pushOp(c, i, -s);
-          if (f > 0) {
+          if (f > 0 && f < Infinity) {
             const q = Math.floor(s / f), r = s - q * f;
             if (q > 0) this.addOp(c, i, DX[rr], DY[rr], q);
             if (r > 0) this.addOp(c, i, DX[ll], DY[ll], r);
@@ -1009,7 +1126,7 @@ class World {
     const sc = this.srcC, si = this.srcI;
     for (let k = 0; k < sc.length; k++) {
       const q = sc[k], qi = si[k];
-      if (q.type[qi] === 6) { const s6 = q.st[qi]; if (s6 > 0) this.pushOp(q, qi, -s6); { const sd = q.dir[qi] & 3; this.addOp(q, qi, DX[sd], DY[sd], 1); } }
+      if (q.type[qi] === 6) { const s6 = q.st[qi]; if (s6 === Infinity) this.pushBig(q, qi, -q.bg.get(qi)); else if (s6 > 0) this.pushOp(q, qi, -s6); { const sd = q.dir[qi] & 3; this.addOp(q, qi, DX[sd], DY[sd], 1); } }
       else if (q.dir[qi] & 4) { const d = q.dir[qi] & 3; this.addOp(q, qi, DX[d], DY[d], 1); }
     }
     const ng = this.curGen + 1, nc = this.nextC, ni = this.nextI;
@@ -1022,14 +1139,23 @@ class World {
       const c = oc[k], i = oi[k], dv = od[k], st = c.st;
       if (rec) { rc[k] = c; rv[k] = st[i]; }
       if (trk && c.dg !== dg) { c.dg = dg; (c.sh || (c.sh = new Float64Array(N))).set(st); trk.push(c); }
-      const v = st[i] + dv; st[i] = v; c.ver = vc;
-      if (v > MAXS) ov.push(c, i);
+      const o = st[i], v = o + dv; st[i] = v; c.ver = vc;
+      if (v > MAXS) ov.push(c, i, o, dv);
       if (dv > 0 && PUSH[c.type[i]] && c.mark[i] !== ng) { c.mark[i] = ng; nc.push(c); ni.push(i); }
     }
-    for (let k = 0; k < ov.length; k += 2) if (ov[k].st[ov[k + 1]] > MAXS) ov[k].st[ov[k + 1]] = MAXS;
+    if (ov.length) {
+      if (this.noBig) this.ovf = true;
+      else for (let k = 0; k < ov.length; k += 4) {
+        const c = ov[k], i = ov[k + 1], o = ov[k + 2];
+        if (o === Infinity) c.bg.set(i, c.bg.get(i) + BigInt(ov[k + 3]));
+        else if (c.st[i] !== Infinity) this.putBig(c, i, BigInt(c.st[i]));
+      }
+    }
+    if (this.bopN) this.applyBig(ng, nc, ni, vc);
     this.curC = nc; this.curI = ni; this.nextC = C; this.nextI = I; this.curGen = ng;
     this.tick++; this.mods++;
-    if (rec) {
+    if (this.bigN > 0 && !this.noBig) { this.dropHist(); }
+    else if (rec) {
       this.hist.push(rec); this.recCount += rec.c.length;
       let drop = 0;
       while (this.recCount > this.recMax && drop < this.hist.length - 1) this.recCount -= this.hist[drop++].c.length;
@@ -1046,7 +1172,7 @@ class World {
     this.prune();
     const chunks = [];
     for (const c of this.chunks.values()) {
-      chunks.push(share ? { cx: c.cx, cy: c.cy, type: c.type, dir: c.dir, st: c.st } : { cx: c.cx, cy: c.cy, type: c.type.slice(), dir: c.dir.slice(), st: c.st.slice() });
+      chunks.push(share ? { cx: c.cx, cy: c.cy, type: c.type, dir: c.dir, st: c.st, bg: c.bg && c.bg.size ? c.bg : null } : { cx: c.cx, cy: c.cy, type: c.type.slice(), dir: c.dir.slice(), st: c.st.slice(), bg: c.bg && c.bg.size ? new Map(c.bg) : null });
     }
     return { chunks, tick: this.tick, rng: this.rng };
   }
@@ -1058,10 +1184,19 @@ class World {
       c.type.set(d.type); c.dir.set(d.dir); c.st.set(d.st);
       for (let i = 0; i < N; i++) {
         if (isSrcT(c.type[i])) c.srcN++;
-        if (c.st[i] > MAXS) c.st[i] = MAXS;
+        const v = c.st[i];
+        if (v === Infinity) {
+          const b = d.bg && d.bg.get(i);
+          c.st[i] = 0;
+          if (b) this.putBig(c, i, b);
+        } else if (v > MAXS) { c.st[i] = 0; this.putBig(c, i, BigInt(v)); }
       }
     }
     this.srcDirty = true;
+    for (const c of this.chunks.values()) for (let i = 0; i < N; i++) this.touch(c, i);
+  }
+  rebuildActive() {
+    this.curGen++; this.curC = []; this.curI = []; this.nextC = []; this.nextI = [];
     for (const c of this.chunks.values()) for (let i = 0; i < N; i++) this.touch(c, i);
   }
   cellCount() {
@@ -1071,6 +1206,220 @@ class World {
   }
 }
 function isSrcT(t) { return t === 6 || t === 10; }
+
+
+
+const FLAT_MAX = 24e6;
+const FPUSH = new Uint8Array(256);
+for (let i = 0; i < PUSH.length; i++) FPUSH[i] = PUSH[i];
+
+const DXs = [0, 1, 0, -1], DYs = [-1, 0, 1, 0];
+function fTg(NB, id, dx, dy) {
+  const i = id & 1023, x = (i & 31) + dx, y = (i >> 5) + dy;
+  if (((x | y) & -32) === 0) return (id & -1024) | (y << 5) | x;
+  return (NB[(id >> 10) * 9 + ((y >> 5) + 1) * 3 + (x >> 5) + 1] << 10) | ((y & 31) << 5) | (x & 31);
+}
+
+class FlatSim {
+  static compile(world) {
+    const KEY = (cx, cy) => (cx + 33554432) * 67108864 + (cy + 33554432);
+    const real = [], map = new Map();
+    for (const c of world.chunks.values()) { map.set(KEY(c.cx, c.cy), real.length); real.push(c); }
+    if (!real.length) return null;
+    const cxs = real.map(c => c.cx), cys = real.map(c => c.cy);
+    for (let k = 0, n = real.length; k < n; k++) {
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const key = KEY(cxs[k] + dx, cys[k] + dy);
+        if (!map.has(key)) { map.set(key, cxs.length); cxs.push(cxs[k] + dx); cys.push(cys[k] + dy); }
+      }
+      if (cxs.length * 1024 > FLAT_MAX) return null;
+    }
+    const slots = cxs.length, total = slots * 1024, f = new FlatSim();
+    f.CX = Int32Array.from(cxs); f.CY = Int32Array.from(cys);
+    const NB = f.NB = new Int32Array(slots * 9).fill(-1);
+    for (let k = 0; k < slots; k++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const q = map.get(KEY(cxs[k] + dx, cys[k] + dy));
+      if (q !== undefined) NB[k * 9 + (dy + 1) * 3 + dx + 1] = q;
+    }
+    const buf = new ArrayBuffer(total * 16); f.F = new Float64Array(buf); f.U = new Uint32Array(buf);
+    const U = f.U, F = f.F;
+    for (let k = 0; k < real.length; k++) {
+      const c = real[k], base = k * 1024;
+      for (let i = 0; i < 1024; i++) { F[(base + i) << 1] = c.st[i]; U[((base + i) << 2) + 2] = c.type[i] | (c.dir[i] << 8); }
+    }
+    f.SH = new Float64Array(total); for (let id = 0; id < total; id++) f.SH[id] = F[id << 1];
+    f.win = new Int32Array(1 << 20); f.wn = 0; f.xs = new Int32Array(4096); f.xn = 0;
+    f.real = real.length; f.slots = slots;
+    const src = [], cur = [];
+    for (let id = 0, e = real.length * 1024; id < e; id++) {
+      const t = U[(id << 2) + 2] & 255;
+      if (t === 6 || t === 10) src.push(id);
+      if (FPUSH[t] && F[id << 1] > 0) cur.push(id);
+    }
+    f.src = Int32Array.from(src);
+    f.cur = Int32Array.from(cur); f.n = cur.length;
+    f.nxt = new Int32Array(Math.max(1024, cur.length * 2));
+    f.opId = new Int32Array(1024); f.opD = new Float64Array(1024);
+    f.gen = 1; f.tick = world.tick; f.rng = world.rng;
+    for (const id of cur) U[(id << 2) + 3] = f.gen;
+    f.worldChunks = real;
+    return f;
+  }
+
+  next() { let x = this.rng | 0; x ^= x << 13; x ^= x >>> 17; x ^= x << 5; this.rng = x; return x >>> 0; }
+  binom(n) {
+    if (n <= 64) { let k = 0; for (let j = 0; j < n; j++) if (this.next() >>> 31) k++; return k; }
+    const u1 = (this.next() + 1) / 4294967297, u2 = this.next() / 4294967296;
+    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(6.283185307179586 * u2);
+    return Math.max(0, Math.min(n, Math.round(n / 2 + z * Math.sqrt(n) / 2)));
+  }
+
+  step() {
+    const F = this.F, U = this.U, NB = this.NB, cur = this.cur, n = this.n, src = this.src;
+    const need = n * 4 + src.length * 2 + 16;
+    if (this.opId.length < need) { const sz = Math.max(need, this.opId.length * 2); this.opId = new Int32Array(sz); this.opD = new Float64Array(sz); }
+    const oi = this.opId, od = this.opD;
+    let m = 0;
+    this.addWin(cur, n); this.addWin(src, src.length);
+    for (let k = 0; k < n; k++) {
+      const id = cur[k], s = F[id << 1];
+      if (s <= 0) continue;
+      const meta = U[(id << 2) + 2], t = meta & 255, d = meta >>> 8;
+      switch (t) {
+        case 1: {
+          oi[m] = id; od[m++] = -s;
+          const g = fTg(NB, id, DXs[d], DYs[d]);
+          if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = s; }
+          break;
+        }
+        case 7: {
+          oi[m] = id; od[m++] = -s;
+          const g = fTg(NB, id, DXs[d & 3], DYs[d & 3]);
+          if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = s; }
+          break;
+        }
+        case 5: {
+          oi[m] = id; od[m++] = -s;
+          const g = fTg(NB, id, DXs[d] * 2, DYs[d] * 2);
+          if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = s; }
+          break;
+        }
+        case 2:
+          oi[m] = id; od[m++] = -s;
+          break;
+        case 8: {
+          oi[m] = id; od[m++] = -s;
+          const g = fTg(NB, id, DXs[d], DYs[d]);
+          if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = 1; }
+          break;
+        }
+        case 9: {
+          oi[m] = id; od[m++] = -s;
+          const q = this.binom(s);
+          if (q > 0) { const g = fTg(NB, id, DXs[d], DYs[d]); if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = q; } }
+          break;
+        }
+        case 3: {
+          const dd = d & 3, rg = fTg(NB, id, DXs[dd], DYs[dd]), f = (U[(rg << 2) + 2] & 255) === 11 ? 0 : F[rg << 1];
+          const o = ((s > f) !== ((d >> 2) === 1)) ? (dd + 1) & 3 : (dd + 3) & 3;
+          oi[m] = id; od[m++] = -s;
+          const g = fTg(NB, id, DXs[o], DYs[o]);
+          if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = s; }
+          break;
+        }
+        case 4: {
+          oi[m] = id; od[m++] = -s;
+          const v = s - 1;
+          if (v > 0) {
+            let g = fTg(NB, id, DXs[(d + 3) & 3], DYs[(d + 3) & 3]);
+            if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = v; }
+            g = fTg(NB, id, DXs[d], DYs[d]);
+            if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = v; }
+            g = fTg(NB, id, DXs[(d + 1) & 3], DYs[(d + 1) & 3]);
+            if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = v; }
+          }
+          break;
+        }
+        case 12: {
+          const dd = d & 3, rg = fTg(NB, id, DXs[dd], DYs[dd]), f = (U[(rg << 2) + 2] & 255) === 11 ? 0 : F[rg << 1];
+          const rr = (dd + 1 + (d >> 2) * 2) & 3, ll = (dd + 3 - (d >> 2) * 2) & 3;
+          oi[m] = id; od[m++] = -s;
+          if (f > 0) {
+            const q = Math.floor(s / f), r = s - q * f;
+            if (q > 0) { const g = fTg(NB, id, DXs[rr], DYs[rr]); if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = q; } }
+            if (r > 0) { const g = fTg(NB, id, DXs[ll], DYs[ll]); if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = r; } }
+          } else { const g = fTg(NB, id, DXs[ll], DYs[ll]); if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = s; } }
+          break;
+        }
+      }
+    }
+    for (let k = 0; k < src.length; k++) {
+      const id = src[k], meta = U[(id << 2) + 2];
+      if ((meta & 255) === 6) {
+        const s6 = F[id << 1];
+        if (s6 > 0) { oi[m] = id; od[m++] = -s6; }
+        const g = fTg(NB, id, DXs[(meta >>> 8) & 3], DYs[(meta >>> 8) & 3]);
+        if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = 1; }
+      } else if ((meta >>> 8) & 4) {
+        const g = fTg(NB, id, DXs[(meta >>> 8) & 3], DYs[(meta >>> 8) & 3]);
+        if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = 1; }
+      }
+    }
+    const ng = this.gen + 1;
+    if (this.nxt.length < m + 16) this.nxt = new Int32Array(Math.max(m + 16, this.nxt.length * 2));
+    const nxt = this.nxt;
+    let nn = 0, ov = null;
+    for (let k = 0; k < m; k++) {
+      const id = oi[k], dv = od[k], v = F[id << 1] + dv;
+      F[id << 1] = v;
+      if (v > MAXS) ov = true;
+      if (dv > 0) {
+        if (FPUSH[U[(id << 2) + 2] & 255] !== 0) { if (U[(id << 2) + 3] !== ng) { U[(id << 2) + 3] = ng; nxt[nn++] = id; } }
+        else { if (this.xn === this.xs.length) this.growX(); this.xs[this.xn++] = id; }
+      }
+    }
+    if (ov) this.ovf = true;
+    this.nxt = cur; this.cur = nxt; this.n = nn; this.gen = ng; this.tick++;
+    return true;
+  }
+
+  addWin(a, n) {
+    if (this.wn + n > this.win.length) { const w2 = new Int32Array(Math.max(this.win.length * 2, this.wn + n)); w2.set(this.win.subarray(0, this.wn)); this.win = w2; }
+    this.win.set(a.subarray(0, n), this.wn); this.wn += n;
+  }
+  growX() { const x = new Int32Array(this.xs.length * 2); x.set(this.xs); this.xs = x; }
+  emit(list, n, out) {
+    const F = this.F, SH = this.SH, CX = this.CX, CY = this.CY;
+    for (let k = 0; k < n; k++) {
+      const id = list[k], v = F[id << 1];
+      if (v === SH[id]) continue;
+      SH[id] = v;
+      if (out.n === out.cap) out.grow();
+      const q = out.n++, sl = id >> 10;
+      out.cx[q] = CX[sl]; out.cy[q] = CY[sl]; out.idx[q] = id & 1023; out.val[q] = v;
+    }
+  }
+  collect(out) {
+    this.emit(this.win, this.wn, out); this.emit(this.cur, this.n, out); this.emit(this.xs, this.xn, out);
+    this.wn = 0; this.xn = 0;
+    if (this.win.length > (1 << 24)) this.win = new Int32Array(1 << 20);
+  }
+
+  writeBack(world) {
+    const F = this.F, CX = this.CX, CY = this.CY;
+    for (let sl = 0; sl < this.slots; sl++) {
+      let c = sl < this.real ? this.worldChunks[sl] : null;
+      for (let i = 0; i < 1024; i++) {
+        const v = F[((sl << 10) + i) << 1];
+        if (v === 0 && !c) continue;
+        if (!c) { c = world.getChunk(CX[sl], CY[sl], true); if (!c) break; }
+        c.st[i] = v;
+      }
+    }
+    world.tick = this.tick; world.rng = this.rng; world.srcDirty = true;
+    world.rebuildActive();
+  }
+}
 
 
 
@@ -1094,16 +1443,31 @@ class ByteWriter {
 function packWorld(data, name, desc, view) {
   const ch = data.chunks.slice().sort((p, q) => p.cy - q.cy || p.cx - q.cx);
   const w = new ByteWriter(ch.length * 1100 + 4096), enc = new TextEncoder();
-  w.byte(view ? 3 : desc ? 2 : 1);
+  let nbig = 0;
+  for (const c of ch) if (c.bg && c.bg.size) nbig += c.bg.size;
+  w.byte(nbig ? 4 : view ? 3 : desc ? 2 : 1);
   const nb = enc.encode(name || ''); w.varint(nb.length); w.bytes(nb);
-  if (desc || view) { const db = enc.encode((desc || '').slice(0, 30000)); w.varint(db.length); w.bytes(db); }
+  if (desc || view || nbig) { const db = enc.encode((desc || '').slice(0, 30000)); w.varint(db.length); w.bytes(db); }
+  if (nbig) w.byte(view ? 1 : 0);
   if (view) { w.varint(zz(Math.round(view.x * 1000))); w.varint(zz(Math.round(view.y * 1000))); w.varint(Math.max(1, Math.round(view.z * 1e6))); }
   w.varint(data.tick || 0);
   w.varint(ch.length);
   let px = 0, py = 0;
   for (const c of ch) { w.varint(zz(c.cx - px)); w.varint(zz(c.cy - py)); px = c.cx; py = c.cy; }
   for (const c of ch) { w.need(1024); for (let i = 0; i < 1024; i++) w.buf[w.n++] = c.type[i] | (c.dir[i] << 4); }
-  for (const c of ch) { w.need(1024 * 10); for (let i = 0; i < 1024; i++) w.varint(c.st[i]); }
+  for (const c of ch) { w.need(1024 * 10); for (let i = 0; i < 1024; i++) w.varint(c.st[i] < Infinity ? c.st[i] : 0); }
+  if (nbig) {
+    w.varint(nbig);
+    ch.forEach((c, ci) => {
+      if (!c.bg) return;
+      for (const [i, b] of c.bg) {
+        let h = b.toString(16); if (h.length % 2) h = '0' + h;
+        const n = h.length / 2;
+        w.varint(ci); w.varint(i); w.varint(n); w.need(n);
+        for (let k = 0; k < n; k++) w.buf[w.n++] = parseInt(h.substr(k * 2, 2), 16);
+      }
+    });
+  }
   return w.done();
 }
 
@@ -1112,13 +1476,15 @@ function unpackWorld(u) {
   const get = () => { if (p >= u.length) throw new Error('обрыв данных'); return u[p++]; };
   const getVar = () => { let v = 0, m = 1, b; do { b = get(); v += (b & 127) * m; m *= 128; } while (b & 128); return v; };
   const ver = get();
-  if (ver < 1 || ver > 3) throw new Error('неизвестная версия формата');
+  if (ver < 1 || ver > 4) throw new Error('неизвестная версия формата');
   const nl = getVar();
   const name = new TextDecoder().decode(u.subarray(p, p + nl)); p += nl;
   let desc = '';
   if (ver >= 2) { const dl = getVar(); if (dl > 40000) throw new Error('неверное описание'); desc = new TextDecoder().decode(u.subarray(p, p + dl)); p += dl; }
   let view = null;
-  if (ver === 3) { const vx = unzz(getVar()) / 1000, vy = unzz(getVar()) / 1000, vz = getVar() / 1e6; view = { x: vx, y: vy, z: vz }; }
+  let hasView = ver === 3;
+  if (ver === 4) hasView = get() === 1;
+  if (hasView) { const vx = unzz(getVar()) / 1000, vy = unzz(getVar()) / 1000, vz = getVar() / 1e6; view = { x: vx, y: vy, z: vz }; }
   const tick = getVar();
   const n = getVar();
   if (n > 4e6) throw new Error('слишком много чанков');
@@ -1133,6 +1499,19 @@ function unpackWorld(u) {
     c.type[i] = t; c.dir[i] = d;
   }
   for (const c of ch) for (let i = 0; i < 1024; i++) c.st[i] = getVar();
+  if (ver === 4) {
+    const nb2 = getVar();
+    for (let k = 0; k < nb2; k++) {
+      const ci = getVar(), i = getVar(), n = getVar();
+      if (ci >= ch.length || i >= 1024 || n > 100000) throw new Error('неверное число');
+      let h = '';
+      for (let j = 0; j < n; j++) h += get().toString(16).padStart(2, '0');
+      const b = BigInt('0x' + (h || '0'));
+      const c = ch[ci];
+      if (b > BigInt(MAXS)) { if (!c.bg) c.bg = new Map(); c.bg.set(i, b); c.st[i] = Infinity; }
+      else c.st[i] = Number(b);
+    }
+  }
   return { name, desc, view, data: { chunks: ch, tick } };
 }
 
@@ -1452,7 +1831,7 @@ function puzzleFresh(p, cells, ti) {
   for (const c of cells) putCell(w, c);
   const pre = p.pre || [];
   for (const q of pre) w.setStones(q[0], q[1], q[2]);
-  if (ti !== undefined) for (const inj of p.tests[ti].inject) if (inj[0] === 0) w.setStones(inj[1], inj[2], w.stAt(inj[1], inj[2]) + inj[3]);
+  if (ti !== undefined) for (const inj of p.tests[ti].inject) if (inj[0] === 0) w.setStones(inj[1], inj[2], addSt(w.valAt(inj[1], inj[2]), inj[3]));
   return w;
 }
 function puzzleCheck(p, cells) {
@@ -1464,15 +1843,15 @@ function puzzleCheck(p, cells) {
     const wins = T.win || [], rec = new Map();
     for (const q of wins) if (q[0] === 0) rec.set('0,' + q[2] + ',' + q[3], 0);
     for (let t = 0; t < T.ticks; t++) {
-      for (const inj of T.inject) if (inj[0] === t) w.setStones(inj[1], inj[2], w.stAt(inj[1], inj[2]) + inj[3]);
+      for (const inj of T.inject) if (inj[0] === t) w.setStones(inj[1], inj[2], addSt(w.valAt(inj[1], inj[2]), inj[3]));
       w.step();
-      for (const q of wins) if (t + 1 === q[0] || t + 1 === q[1]) rec.set((t + 1) + ',' + q[2] + ',' + q[3], w.stAt(q[2], q[3]));
+      for (const q of wins) if (t + 1 === q[0] || t + 1 === q[1]) rec.set((t + 1) + ',' + q[2] + ',' + q[3], w.valAt(q[2], q[3]));
     }
     for (const q of wins) {
       const d = rec.get(q[1] + ',' + q[2] + ',' + q[3]) - rec.get(q[0] + ',' + q[2] + ',' + q[3]);
       if (!(d >= q[4] && d <= q[5])) return { ok: false, failed: ti, got: d, want: q[4] === q[5] ? q[4] : q[4] + '-' + q[5], at: [q[2], q[3]] };
     }
-    for (const e of (T.expect || [])) { const got = w.stAt(e[0], e[1]); if (got !== e[2]) return { ok: false, failed: ti, got, want: e[2], at: [e[0], e[1]] }; }
+    for (const e of (T.expect || [])) { const got = w.valAt(e[0], e[1]); if (got !== e[2]) return { ok: false, failed: ti, got, want: e[2], at: [e[0], e[1]] }; }
   }
   return { ok: true, failed: -1 };
 }
@@ -1483,7 +1862,7 @@ function puzzleCellsOf(world, p, pst) {
     const t = c.type[i]; if (!t && !(pst ? 0 : c.st[i])) continue;
     const x = c.cx * 32 + (i & 31), y = c.cy * 32 + (i >> 5), k = x + ',' + y;
     if (!inside(x, y)) continue;
-    seen.add(k); out.push({ x, y, t, d: c.dir[i], s: pst ? pst[k] || 0 : c.st[i] });
+    seen.add(k); out.push({ x, y, t, d: c.dir[i], s: pst ? pst[k] || 0 : stOf(c, i) });
   }
   if (pst) for (const k in pst) {
     if (seen.has(k) || !pst[k]) continue;
@@ -6568,7 +6947,7 @@ function hsl2hex(h, s, l) {
 }
 const dispCache = new Map();
 function dispInfo(n) {
-  const i = Math.min(n, 100000);
+  const i = typeof n === 'bigint' ? 100000 : Math.min(n, 100000);
   let r = dispCache.get(i);
   if (!r) {
     const col = i <= 15 ? DISP_COL[i] : hsl2hex((i * 47) % 360, 62 + (i % 3) * 8, 42 + ((i >> 2) % 4) * 6);
@@ -6646,7 +7025,13 @@ const Look = {
 
 const ROT = [[1, 0], [0, 1], [-1, 0], [0, -1]];
 
+function fmtBig(b) {
+  const d = b.toString(), e = d.length - 1;
+  return d[0] + '.' + d.slice(1, 3) + 'e' + e;
+}
 function fmtN(n) {
+  if (typeof n === 'bigint') return n <= 999999999999999n ? fmtN(Number(n)) : fmtBig(n);
+  if (n >= 1e15) return fmtBig(BigInt(n));
   if (n < 10000) return String(n);
   if (n < 1e6) return (n / 1e3).toFixed(n < 1e5 ? 1 : 0).replace('.0', '') + 'k';
   if (n < 1e9) return (n / 1e6).toFixed(n < 1e7 ? 1 : 0).replace('.0', '') + 'M';
@@ -7095,8 +7480,10 @@ function renderWorld(ctx, w, view, W, H, dpr, showGrid, style, noAxis) {
     const ly0 = Math.max(0, y0 - cy * 32), ly1 = Math.min(31, y1 - cy * 32);
     const type = c.type, dir = c.dir, st = c.st;
     for (let ly = ly0; ly <= ly1; ly++) for (let lx = lx0; lx <= lx1; lx++) {
-      const i = (ly << 5) | lx, t = type[i], s = st[i];
+      const i = (ly << 5) | lx, t = type[i];
+      let s = st[i];
       if (!t && !s) continue;
+      if (s === Infinity) s = t === 11 ? 0 : c.bg.get(i);
       const sx = ox + (cx * 32 + lx) * z, sy = oy + (cy * 32 + ly) * z;
       if (small) {
         ctx.fillStyle = t === 7 && s > 0 ? dispCol(s) : t ? C.t[t] : C.stone;
@@ -7164,7 +7551,7 @@ function endEdit() {
 }
 function edit(x, y, nt, nd, ns) {
   const w = E.world;
-  const ot = w.typeAt(x, y), od = w.dirAt(x, y), os = w.stAt(x, y);
+  const ot = w.typeAt(x, y), od = w.dirAt(x, y), os = w.valAt(x, y);
   if (E.puzzle && !E.force && !puzzleCanEdit(x, y, nt, ns)) { puzzleDenied(); return false; }
   if (ot === 11 && nt === undefined) return false;
   if (ot === 11 && nt !== undefined && nt !== 11 && ns === undefined) ns = 0;
@@ -7174,13 +7561,13 @@ function edit(x, y, nt, nd, ns) {
     const dd = DIRECTIONAL[nt] ? (nd & (VARIANT[nt] ? 7 : 3)) : 0;
     if (nt !== ot || dd !== od) mask |= 1;
   }
-  if (ns !== undefined) { ns = Math.max(0, Math.min(MAXS, Math.floor(ns))); if (ns !== os) mask |= 2; }
+  if (ns !== undefined) { ns = normSt(ns); if (ns !== os) mask |= 2; }
   if (!mask) return false;
   if (mask & 1) w.setType(x, y, nt, nd);
   if (mask & 2) { w.setStones(x, y, ns); pstNote(x, y, ns); }
   const solo = !E.cur;
   if (solo) beginEdit();
-  E.cur.push([x, y, mask, ot, od, os, w.typeAt(x, y), w.dirAt(x, y), w.stAt(x, y)]);
+  E.cur.push([x, y, mask, ot, od, os, w.typeAt(x, y), w.dirAt(x, y), w.valAt(x, y)]);
   if (solo) endEdit();
   if (!E.running) E.snap = null;
   if (E.puzzle && !E.force) E.puzzleDirty = true;
@@ -7206,7 +7593,7 @@ function interact(x, y) {
   const t = E.world.typeAt(x, y);
   if (t !== 8 && t !== 10) return false;
   E.force = true;
-  if (t === 8) edit(x, y, undefined, undefined, E.world.stAt(x, y) + 1);
+  if (t === 8) edit(x, y, undefined, undefined, addSt(E.world.valAt(x, y), 1));
   else edit(x, y, 10, E.world.dirAt(x, y) ^ 4);
   E.force = false; return true;
   return false;
@@ -7224,7 +7611,7 @@ function nonEmptyIn(r) {
     for (let i = 0; i < N; i++) {
       if (!c.type[i] && !c.st[i]) continue;
       const x = c.cx * 32 + (i & 31), y = c.cy * 32 + (i >> 5);
-      if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) out.push({ x, y, t: c.type[i], d: c.dir[i], s: c.st[i] });
+      if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) out.push({ x, y, t: c.type[i], d: c.dir[i], s: stOf(c, i) });
     }
   };
   if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > w.chunks.size) {
@@ -7393,7 +7780,7 @@ function planFromData(name, data) {
     if (!c.type[i] && !c.st[i]) continue;
     const x = c.cx * 32 + (i & 31), y = c.cy * 32 + (i >> 5);
     x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
-    cells.push({ x, y, t: c.type[i], d: c.dir[i], s: c.st[i] });
+    cells.push({ x, y, t: c.type[i], d: c.dir[i], s: stOf(c, i) });
   }
   if (!cells.length) throw new Error('empty');
   return { id: Store.newId(), name: name || 'Plan', w: x1 - x0 + 1, h: y1 - y0 + 1, created: Date.now(), cells: cells.map(c => ({ dx: c.x - x0, dy: c.y - y0, t: c.t, d: c.d, s: c.s })) };
@@ -7495,10 +7882,11 @@ function updateCellTip() {
   const t = $('ctip'), m = E.mouse, now = performance.now();
   let show = false;
   if (m.inside && !drag && !E.selHold && now - m.t > 350 && !anyDialog()) {
-    const n = E.world.typeAt(m.cx, m.cy) === 11 ? 0 : E.world.stAt(m.cx, m.cy);
+    const n = E.world.typeAt(m.cx, m.cy) === 11 ? 0 : E.world.valAt(m.cx, m.cy);
     if (n >= 10000) {
       const str = S().stonesN(n.toLocaleString(langInfo().tag));
       if (t.textContent !== str) t.textContent = str;
+      t.classList.toggle('big', typeof n === 'bigint');
       t.style.left = Math.min(innerWidth - 150, m.px + 14) + 'px'; t.style.top = (m.py + 18) + 'px'; show = true;
     }
   }
@@ -7511,7 +7899,7 @@ function updateHud() {
   if (Cfg.hideInfo) return;
   const s = S(), w = E.world, m = E.mouse;
   const I = Cfg.info, ln = [];
-  if (I.xy && m.inside) { const st = w.stAt(m.cx, m.cy); ln.push(s.xy + ': ' + m.cx + ', ' + m.cy + (st ? ' (' + st + ')' : '')); }
+  if (I.xy && m.inside) { const st = w.valAt(m.cx, m.cy); ln.push(s.xy + ': ' + m.cx + ', ' + m.cy + (st ? ' (' + (typeof st === 'bigint' ? fmtN(st) : st) + ')' : '')); }
   const t = [];
   if (I.tick) t.push(s.tick + ': ' + w.tick + (E.batch > 0 ? ' (+' + E.batch + ')' : ''));
   if (I.tps && E.running) t.push(E.tw.tps + ' ' + s.tps);
@@ -7538,7 +7926,7 @@ function strokeApply(x, y) {
   const d = drag, k = x + ',' + y;
   if (d.seen.has(k)) return;
   d.seen.add(k);
-  if (d.kind === 'stone') edit(x, y, undefined, undefined, E.world.stAt(x, y) + d.delta);
+  if (d.kind === 'stone') edit(x, y, undefined, undefined, addSt(E.world.valAt(x, y), d.delta));
   else if (d.kind === 'paint') edit(x, y, E.brush.t, brushDir());
   else if (d.kind === 'erase') edit(x, y, 0, 0);
 }
@@ -7758,7 +8146,7 @@ function onKeyUp(e0) {
   if (e.code === 'KeyE' && E.selHold) { const moved = E.selHold.moved; selHoldEnd(); if (!moved) { E.sel = null; onModeChange(); need(); } }
   if (e.code === 'AltLeft' || e.code === 'AltRight') { E.keys.delete('ShiftLeft'); if (Cfg.altMode) e.preventDefault(); }
 }
-function stoneAtMouse(n) { const m = E.mouse; if (m.inside) edit(m.cx, m.cy, undefined, undefined, E.world.stAt(m.cx, m.cy) + n); }
+function stoneAtMouse(n) { const m = E.mouse; if (m.inside) edit(m.cx, m.cy, undefined, undefined, addSt(E.world.valAt(m.cx, m.cy), n)); }
 function selectAll() {
   let x0 = 1e18, y0 = 1e18, x1 = -1e18, y1 = -1e18;
   for (const c of E.world.chunks.values()) for (let i = 0; i < N; i++) {
@@ -7783,11 +8171,26 @@ function openNum(mode) {
   inp.focus(); setTimeout(() => { if (numMode) inp.focus(); }, 0);
 }
 function closeNum() { $('numBox').hidden = true; numMode = null; cv.focus(); }
+function parseHuge(v) {
+  v = v.replace(/[\s,_]/g, '');
+  let m = /^(\d+)$/.exec(v);
+  if (m) return m[1].length > 20000 ? null : normSt(BigInt(m[1]));
+  m = /^(\d+)e\+?(\d+)$/i.exec(v);
+  if (m) { if (m[1].length + +m[2] > 20000) return null; return normSt(BigInt(m[1]) * 10n ** BigInt(m[2])); }
+  const n = Math.floor(Number(v));
+  return isFinite(n) && n >= 0 ? normSt(n) : null;
+}
 function submitNum() {
   const v = $('numInput').value.trim(), mode = numMode, noStones = $('numNoStones').classList.contains('on');
   closeNum();
   if (mode === 'bpname') { saveSelAsPlan(v || S().bpDefault + ' ' + (Math.floor(Math.random() * 900) + 100), noStones); return; }
   if (v === '') return;
+  if (mode === 'stones') {
+    const hv = parseHuge(v);
+    if (hv === null) return;
+    if (E.sel) setSelStones(hv); else edit(E.mouse.cx, E.mouse.cy, undefined, undefined, hv);
+    return;
+  }
   const n = Math.floor(Number(v));
   if (!isFinite(n) || n < 0) return;
   if (mode === 'speed') { E.speedCustom = Math.max(1, Math.min(1e6, n)); updateSpeed(); return; }
@@ -7849,7 +8252,11 @@ function startWorker() {
   const st = E.wk = { wk, world: w, ready: false, speed: null, done: null, stopping: false };
   const proto = World.prototype;
   w.setType = function (x, y, t, d) { proto.setType.call(this, x, y, t, d); wk.postMessage({ cmd: 'type', x, y, t, d }); };
-  w.setStones = function (x, y, s) { proto.setStones.call(this, x, y, s); wk.postMessage({ cmd: 'stones', x, y, s }); };
+  w.setStones = function (x, y, s) {
+    s = normSt(s);
+    if (typeof s === 'bigint') { killWorker(st); return w.setStones(x, y, s); }
+    proto.setStones.call(this, x, y, s); wk.postMessage({ cmd: 'stones', x, y, s });
+  };
   wk.onmessage = e => {
     const m = e.data;
     if (m.cmd === 'ready') { st.ready = true; return; }
@@ -7859,18 +8266,24 @@ function startWorker() {
         for (let j = 0; j < m.idx.length; j++) {
           const x = m.cx[j], y = m.cy[j];
           if (!lc || x !== lx || y !== ly) { lc = w.getChunk(x, y, true); lx = x; ly = y; lc.ver = ++w.vc; }
-          lc.st[m.idx[j]] = m.val[j];
+          const dv = m.val[j];
+          if (dv > MAXS) { lc.st[m.idx[j]] = 0; w.putBig(lc, m.idx[j], BigInt(dv)); } else lc.st[m.idx[j]] = dv;
         }
-        w.tick = m.tick; w.mods++; E.tw.n += m.ticks; E.need = true; E.dirtySave = true;
+        w.tick = m.tick; w.rng = m.rng; w.mods++; E.tw.n += m.ticks; E.need = true; E.dirtySave = true;
       }
       if (m.cmd === 'stopped') {
         delete w.setType; delete w.setStones; wk.terminate(); if (E.wk === st) E.wk = null;
-        w.dropHist(); E.wkEnd = performance.now(); if (st.done) st.done();
+        w.dropHist(); w.rebuildActive(); w.srcDirty = true; E.wkEnd = performance.now(); if (st.done) st.done();
       }
     }
   };
   wk.onerror = () => { delete w.setType; delete w.setStones; wk.terminate(); if (E.wk === st) E.wk = null; E.wkEnd = performance.now() + 60000; E.wkOff = true; if (st.done) st.done(); };
   wk.postMessage({ cmd: 'init', data: w.toData(true) });
+}
+function killWorker(st) {
+  const w = st.world;
+  delete w.setType; delete w.setStones; st.wk.terminate(); if (E.wk === st) E.wk = null;
+  w.dropHist(); w.rebuildActive(); w.srcDirty = true; E.wkEnd = performance.now(); if (st.done) st.done();
 }
 function stopWorker() {
   const st = E.wk; if (!st) return Promise.resolve();
@@ -7885,7 +8298,7 @@ function simulate(now) {
     if (st.ready && !st.stopping && st.speed !== sp) { st.speed = sp; st.wk.postMessage({ cmd: 'run', tps: sp }); }
     E.last = now; return;
   }
-  if (E.running && !E.batch && !E.puzzle && !E.tutorial && !E.wkOff && typeof Worker !== 'undefined' && E.stepMs > 1.5 && E.world.chunks.size >= 40 && now - (E.wkEnd || 0) > 2000) { startWorker(); E.last = now; return; }
+  if (E.running && !E.batch && !E.puzzle && !E.tutorial && E.world.bigN === 0 && !E.wkOff && typeof Worker !== 'undefined' && E.stepMs > 1.5 && E.world.chunks.size >= 40 && now - (E.wkEnd || 0) > 2000) { startWorker(); E.last = now; return; }
   const t0 = performance.now(); let n = 0;
   const turbo = E.batch > 0 || (E.running && curSpeed() === Infinity), W0 = E.world;
   if (turbo && W0.recOn) { W0.recOn = false; W0.dropHist(); } else if (!turbo && !W0.recOn) W0.recOn = true;
@@ -8728,7 +9141,7 @@ function worldCells(w, pred) {
   for (const c of w.chunks.values()) for (let i = 0; i < 1024; i++) {
     const x = c.cx * 32 + (i & 31), y = c.cy * 32 + (i >> 5);
     if (pred && !pred(x, y)) continue;
-    if (c.type[i] || c.st[i]) out.push({ x, y, t: c.type[i], d: c.dir[i], s: c.st[i], tok: c.type[i] ? cellToken(c.type[i], c.dir[i], c.st[i]) : null });
+    if (c.type[i] || c.st[i]) out.push({ x, y, t: c.type[i], d: c.dir[i], s: stOf(c, i), tok: c.type[i] ? cellToken(c.type[i], c.dir[i], stOf(c, i)) : null });
   }
   return out;
 }
@@ -8809,69 +9222,95 @@ PUZZLES.forEach(p => { for (const l in PUZZLE_TR) if (PUZZLE_TR[l][p.id]) p[l] =
 
 
 function simWorkerMain() {
-  let w = null, running = false, tps = 1, acc = 0, last = 0, flushedAt = 0, ticks = 0;
+  let overflow = false, w = null, fs = null, running = false, tps = 1, acc = 0, last = 0, flushedAt = 0, ticks = 0, gap = 30;
   const pending = [];
-  let cap = 65536, bx = new Int32Array(cap), by = new Int32Array(cap), bi = new Uint16Array(cap), bv = new Float64Array(cap);
-  const grow = () => {
-    cap *= 2;
-    const x = new Int32Array(cap), y = new Int32Array(cap), i = new Uint16Array(cap), v = new Float64Array(cap);
-    x.set(bx); y.set(by); i.set(bi); v.set(bv); bx = x; by = y; bi = i; bv = v;
+  const out = {
+    n: 0, cap: 65536, cx: new Int32Array(65536), cy: new Int32Array(65536), idx: new Uint16Array(65536), val: new Float64Array(65536),
+    grow() {
+      this.cap *= 2;
+      const x = new Int32Array(this.cap), y = new Int32Array(this.cap), i = new Uint16Array(this.cap), v = new Float64Array(this.cap);
+      x.set(this.cx); y.set(this.cy); i.set(this.idx); v.set(this.val); this.cx = x; this.cy = y; this.idx = i; this.val = v;
+    }
   };
   const touch = c => {
     if (c.dg === w.dgen) return;
     c.dg = w.dgen; (c.sh || (c.sh = new Float64Array(1024))).set(c.st); pending.push(c);
   };
-  const flush = () => {
-    let n = 0;
+  const collectOld = () => {
     for (let j = 0; j < pending.length; j++) {
       const c = pending[j], st = c.st, sh = c.sh;
       for (let i = 0; i < 1024; i++) {
         if (st[i] === sh[i]) continue;
-        if (n === cap) grow();
-        bx[n] = c.cx; by[n] = c.cy; bi[n] = i; bv[n] = st[i]; n++;
+        if (out.n === out.cap) out.grow();
+        out.cx[out.n] = c.cx; out.cy[out.n] = c.cy; out.idx[out.n] = i; out.val[out.n] = st[i]; out.n++;
       }
     }
     pending.length = 0; w.dgen++;
-    const cx = bx.slice(0, n), cy = by.slice(0, n), idx = bi.slice(0, n), val = bv.slice(0, n);
-    postMessage({ cmd: 'delta', cx, cy, idx, val, tick: w.tick, ticks }, [cx.buffer, cy.buffer, idx.buffer, val.buffer]);
-    ticks = 0; flushedAt = performance.now();
+  };
+  const flush = () => {
+    const f0 = performance.now();
+    if (fs) fs.collect(out); else collectOld();
+    const n = out.n, cx = out.cx.slice(0, n), cy = out.cy.slice(0, n), idx = out.idx.slice(0, n), val = out.val.slice(0, n);
+    out.n = 0;
+    postMessage({ cmd: 'delta', cx, cy, idx, val, tick: fs ? fs.tick : w.tick, rng: fs ? fs.rng : w.rng, ticks }, [cx.buffer, cy.buffer, idx.buffer, val.buffer]);
+    ticks = 0; flushedAt = performance.now(); gap = Math.max(30, (flushedAt - f0) * 4);
+  };
+  const leaveFlat = () => {
+    if (!fs) return;
+    flush(); fs.writeBack(w); fs = null; w.track = pending;
+  };
+  const enterFlat = () => {
+    if (pending.length) { pending.length = 0; }
+    fs = FlatSim.compile(w);
+    if (fs) w.track = null; else w.track = pending;
+  };
+  const stepOne = () => {
+    if (fs) {
+      if (!fs.step()) { leaveFlat(); enterFlat(); if (fs && !fs.step()) { leaveFlat(); w.step(); } }
+    } else w.step();
+    ticks++;
+    if ((fs && fs.ovf) || w.ovf) { overflow = true; running = false; }
   };
   const loop = () => {
     if (!running) return;
     const t0 = performance.now();
     if (tps === Infinity) {
-      while (performance.now() - t0 < 25) { for (let k = 0; k < 4; k++) { w.step(); ticks++; } }
+      while (performance.now() - t0 < 25) { for (let k = 0; k < 4; k++) stepOne(); }
     } else {
       acc += Math.min(100, t0 - last) * tps / 1000; last = t0;
       const cap = Math.max(3, tps * 0.2); if (acc > cap) acc = cap;
-      while (acc >= 1 && performance.now() - t0 < 25) { w.step(); acc--; ticks++; }
+      while (acc >= 1 && performance.now() - t0 < 25) { stepOne(); acc--; }
     }
-    if (performance.now() - flushedAt >= 30 && (pending.length || ticks)) flush();
+    if (overflow) { flush(); postMessage({ cmd: 'stopped', big: true }); return; }
+    if (performance.now() - flushedAt >= gap && (ticks || (!fs && pending.length))) flush();
     setTimeout(loop, tps !== Infinity && acc < 1 ? 4 : 0);
+  };
+  const edit = (m) => {
+    leaveFlat();
+    const c0 = w.getChunk(m.x >> 5, m.y >> 5, false); if (c0) touch(c0);
+    if (m.cmd === 'type') w.setType(m.x, m.y, m.t, m.d); else w.setStones(m.x, m.y, m.s);
+    const c = w.getChunk(m.x >> 5, m.y >> 5, false); if (c && !c0) { c.sh = new Float64Array(1024); c.dg = w.dgen; pending.push(c); }
+    enterFlat();
   };
   onmessage = e => {
     const m = e.data;
     if (m.cmd === 'init') {
-      w = new World(); w.fromData(m.data); w.recOn = false; w.track = pending;
+      w = new World(); w.fromData(m.data); w.recOn = false; w.noBig = true; enterFlat();
       postMessage({ cmd: 'ready' });
     } else if (m.cmd === 'run') {
       tps = m.tps; if (!running) { running = true; last = performance.now(); acc = 0; flushedAt = last; loop(); }
-    } else if (m.cmd === 'type') {
-      const c0 = w.getChunk(m.x >> 5, m.y >> 5, false); if (c0) touch(c0);
-      w.setType(m.x, m.y, m.t, m.d); const c = w.getChunk(m.x >> 5, m.y >> 5, false); if (c && !c0) { c.sh = new Float64Array(1024); c.dg = w.dgen; pending.push(c); }
-    } else if (m.cmd === 'stones') {
-      const c0 = w.getChunk(m.x >> 5, m.y >> 5, false); if (c0) touch(c0);
-      w.setStones(m.x, m.y, m.s); const c = w.getChunk(m.x >> 5, m.y >> 5, false); if (c && !c0) { c.sh = new Float64Array(1024); c.dg = w.dgen; pending.push(c); }
+    } else if (m.cmd === 'type' || m.cmd === 'stones') {
+      edit(m);
     } else if (m.cmd === 'stop') {
       running = false; flush(); postMessage({ cmd: 'stopped' });
     }
   };
 }
 
-const ENGINE_SRC = "\nconst CS = 32, N = CS * CS;\nconst MAXS = 1e14;\nconst CLIM = 33554432;\nconst T = { EMPTY: 0, WIRE: 1, KILL: 2, CMP: 3, DUP: 4, WIRE2: 5, SRC: 6, DISP: 7, BTN: 8, RAND: 9, SWITCH: 10, SYM: 11, DIV: 12 };\n\nconst DIRECTIONAL = [0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1];\nconst VARIANT = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1];\n\nconst PUSH = new Uint8Array([0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1]);\nconst DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];\n\nclass Chunk {\n  constructor(cx, cy) {\n    this.cx = cx; this.cy = cy;\n    this.type = new Uint8Array(N);\n    this.dir = new Uint8Array(N);\n    this.st = new Float64Array(N);\n    this.mark = new Uint32Array(N);\n    this.nb = new Array(9).fill(null);\n    this.srcN = 0;\n    this.ver = 0; this.mv = -1; this.mc = 0; this.dg = 0; this.sh = null;\n  }\n  isEmpty() {\n    const t = this.type, s = this.st;\n    for (let i = 0; i < N; i++) if (t[i] !== 0 || s[i] !== 0) return false;\n    return true;\n  }\n}\n\nclass World {\n  constructor() {\n    this.chunks = new Map();\n    this.tick = 0; this.rng = 123456789;\n    this.clrC = []; this.clrI = [];\n    this.curC = []; this.curI = []; this.curGen = 1;\n    this.nextC = []; this.nextI = [];\n    this.srcC = []; this.srcI = []; this.srcDirty = false;\n    this.opC = []; this.opI = new Int32Array(4096); this.opD = new Float64Array(4096); this.opN = 0;\n    this.track = null; this.dgen = 1; this.mods = 0; this.vc = 0;\n    this.recOn = true; this.recMax = 1500000; this.recCount = 0; this.hist = []; this.redoN = 0;\n  }\n  dropHist() { if (this.hist.length) { this.hist = []; this.recCount = 0; } this.redoN = 0; }\n\n  getChunk(cx, cy, create) {\n    if (cx < -CLIM || cx >= CLIM || cy < -CLIM || cy >= CLIM) return null;\n    const k = (cx + CLIM) * 67108864 + (cy + CLIM);\n    let c = this.chunks.get(k);\n    if (!c && create) { c = new Chunk(cx, cy); this.chunks.set(k, c); }\n    return c || null;\n  }\n  nbr(c, ox, oy, create) {\n    if (ox === 0 && oy === 0) return c;\n    const j = (oy + 1) * 3 + ox + 1;\n    let n = c.nb[j];\n    if (n) return n;\n    n = this.getChunk(c.cx + ox, c.cy + oy, create);\n    if (n) c.nb[j] = n;\n    return n;\n  }\n  typeAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.type[((y & 31) << 5) | (x & 31)] : 0; }\n  dirAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.dir[((y & 31) << 5) | (x & 31)] : 0; }\n  stAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.st[((y & 31) << 5) | (x & 31)] : 0; }\n\n  touch(c, i) {\n    if (PUSH[c.type[i]] && c.st[i] > 0 && c.mark[i] !== this.curGen) {\n      c.mark[i] = this.curGen; this.curC.push(c); this.curI.push(i);\n    }\n  }\n  setType(x, y, t, d) {\n    this.dropHist();\n    const c = this.getChunk(x >> 5, y >> 5, t !== 0);\n    if (!c) return;\n    const i = ((y & 31) << 5) | (x & 31);\n    const old = c.type[i];\n    if (isSrcT(old)) c.srcN--;\n    if (isSrcT(t)) c.srcN++;\n    if (isSrcT(old) || isSrcT(t)) this.srcDirty = true;\n    c.type[i] = t; c.ver = ++this.vc; this.mods++;\n    c.dir[i] = DIRECTIONAL[t] ? (d & (VARIANT[t] ? 7 : 3)) : 0;\n    this.touch(c, i);\n  }\n  setStones(x, y, s) {\n    this.dropHist();\n    s = Math.max(0, Math.min(MAXS, Math.floor(s)));\n    const c = this.getChunk(x >> 5, y >> 5, s > 0);\n    if (!c) return;\n    const i = ((y & 31) << 5) | (x & 31);\n    c.st[i] = s; c.ver = ++this.vc; this.mods++;\n    this.touch(c, i);\n  }\n  setCell(x, y, t, d, s) { this.setType(x, y, t, d); this.setStones(x, y, s); }\n\n  clear() {\n    this.dropHist();\n    this.chunks.clear(); this.tick = 0; this.mods++;\n    this.curC = []; this.curI = []; this.curGen = 1; this.nextC = []; this.nextI = [];\n    this.srcC = []; this.srcI = []; this.srcDirty = false;\n  }\n\n  pushOp(c, i, v) {\n    const n = this.opN;\n    this.opC[n] = c; this.opI[n] = i; this.opD[n] = v; this.opN = n + 1;\n  }\n  addOp(c, i, dx, dy, v) {\n    let x = (i & 31) + dx, y = (i >> 5) + dy, t = c;\n    if (x < 0 || x > 31 || y < 0 || y > 31) {\n      t = this.nbr(c, x >> 5, y >> 5, true);\n      if (!t) return;\n      x &= 31; y &= 31;\n    }\n    const ti = (y << 5) | x;\n    if (t.type[ti] === 11) return;\n    this.pushOp(t, ti, v);\n  }\n  next() { let x = this.rng | 0; x ^= x << 13; x ^= x >>> 17; x ^= x << 5; this.rng = x; return x >>> 0; }\n  binom(n) {\n    if (n <= 64) { let k = 0; for (let j = 0; j < n; j++) if (this.next() >>> 31) k++; return k; }\n    const u1 = (this.next() + 1) / 4294967297, u2 = this.next() / 4294967296;\n    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(6.283185307179586 * u2);\n    return Math.max(0, Math.min(n, Math.round(n / 2 + z * Math.sqrt(n) / 2)));\n  }\n  readSt(c, i, dx, dy) {\n    let x = (i & 31) + dx, y = (i >> 5) + dy, t = c;\n    if (x < 0 || x > 31 || y < 0 || y > 31) {\n      t = this.nbr(c, x >> 5, y >> 5, false);\n      if (!t) return 0;\n      x &= 31; y &= 31;\n    }\n    const ti = (y << 5) | x;\n    return t.type[ti] === 11 ? 0 : t.st[ti];\n  }\n  rebuildSrc() {\n    this.srcC = []; this.srcI = [];\n    for (const c of this.chunks.values()) {\n      if (c.srcN <= 0) continue;\n      for (let i = 0; i < N; i++) if (isSrcT(c.type[i])) { this.srcC.push(c); this.srcI.push(i); }\n    }\n    this.srcDirty = false;\n  }\n\n  step() { this.redoN = 0; return this.stepCore(); }\n  undoTick() {\n    if (!this.hist.length) return false;\n    const r = this.hist.pop(); this.recCount -= r.c.length;\n    for (let k = r.c.length - 1; k >= 0; k--) { r.c[k].st[r.i[k]] = r.v[k]; r.c[k].ver = ++this.vc; }\n    this.rng = r.rng; this.tick--; this.mods++;\n    this.curC = r.actC; this.curI = r.actI; this.curGen++;\n    for (let k = 0; k < this.curC.length; k++) this.curC[k].mark[this.curI[k]] = this.curGen;\n    this.redoN++; return true;\n  }\n  redoTick() { if (!this.redoN) return false; const n = this.redoN; this.stepCore(); this.redoN = n - 1; return true; }\n  stepCore() {\n    if (this.srcDirty) this.rebuildSrc();\n    const C = this.curC, I = this.curI, n = C.length;\n    const rec = this.recOn ? { c: null, i: null, v: null, actC: C.slice(), actI: I.slice(), rng: this.rng } : null;\n    const need = n * 4 + this.srcC.length * 2 + 16;\n    if (this.opI.length < need) { const sz = Math.max(need, this.opI.length * 2); this.opI = new Int32Array(sz); this.opD = new Float64Array(sz); }\n    this.opN = 0;\n    for (let k = 0; k < n; k++) {\n      const c = C[k], i = I[k], s = c.st[i];\n      if (s <= 0) continue;\n      const t = c.type[i], d = c.dir[i];\n      switch (t) {\n        case 1:\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[d], DY[d], s); break;\n        case 8:\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[d], DY[d], 1); break;\n        case 9: {\n          this.pushOp(c, i, -s);\n          const k = this.binom(s);\n          if (k > 0) this.addOp(c, i, DX[d], DY[d], k);\n          break;\n        }\n        case 2:\n          this.pushOp(c, i, -s); break;\n        case 3: {\n          const dd = d & 3, flip = d >> 2;\n          const f = this.readSt(c, i, DX[dd], DY[dd]);\n          const o = ((s > f) !== (flip === 1)) ? (dd + 1) & 3 : (dd + 3) & 3;\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[o], DY[o], s); break;\n        }\n        case 4: {\n          this.pushOp(c, i, -s);\n          const v = s - 1;\n          if (v > 0) {\n            const l = (d + 3) & 3, r = (d + 1) & 3;\n            this.addOp(c, i, DX[l], DY[l], v);\n            this.addOp(c, i, DX[d], DY[d], v);\n            this.addOp(c, i, DX[r], DY[r], v);\n          }\n          break;\n        }\n        case 5:\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[d] * 2, DY[d] * 2, s); break;\n        case 7: {\n          const dd = d & 3; this.pushOp(c, i, -s); this.addOp(c, i, DX[dd], DY[dd], s); break;\n        }\n        case 12: {\n          const dd = d & 3, f = this.readSt(c, i, DX[dd], DY[dd]);\n          const rr = (dd + 1 + (d >> 2) * 2) & 3, ll = (dd + 3 - (d >> 2) * 2) & 3;\n          this.pushOp(c, i, -s);\n          if (f > 0) {\n            const q = Math.floor(s / f), r = s - q * f;\n            if (q > 0) this.addOp(c, i, DX[rr], DY[rr], q);\n            if (r > 0) this.addOp(c, i, DX[ll], DY[ll], r);\n          } else this.addOp(c, i, DX[ll], DY[ll], s);\n          break;\n        }\n      }\n    }\n    const sc = this.srcC, si = this.srcI;\n    for (let k = 0; k < sc.length; k++) {\n      const q = sc[k], qi = si[k];\n      if (q.type[qi] === 6) { const s6 = q.st[qi]; if (s6 > 0) this.pushOp(q, qi, -s6); { const sd = q.dir[qi] & 3; this.addOp(q, qi, DX[sd], DY[sd], 1); } }\n      else if (q.dir[qi] & 4) { const d = q.dir[qi] & 3; this.addOp(q, qi, DX[d], DY[d], 1); }\n    }\n    const ng = this.curGen + 1, nc = this.nextC, ni = this.nextI;\n    nc.length = 0; ni.length = 0;\n    const oc = this.opC, oi = this.opI, od = this.opD, m = this.opN, trk = this.track, dg = this.dgen;\n    let rc = null, ri = null, rv = null;\n    if (rec) { rc = new Array(m); ri = oi.slice(0, m); rv = new Float64Array(m); rec.c = rc; rec.i = ri; rec.v = rv; }\n    const vc = ++this.vc, ov = [];\n    for (let k = 0; k < m; k++) {\n      const c = oc[k], i = oi[k], dv = od[k], st = c.st;\n      if (rec) { rc[k] = c; rv[k] = st[i]; }\n      if (trk && c.dg !== dg) { c.dg = dg; (c.sh || (c.sh = new Float64Array(N))).set(st); trk.push(c); }\n      const v = st[i] + dv; st[i] = v; c.ver = vc;\n      if (v > MAXS) ov.push(c, i);\n      if (dv > 0 && PUSH[c.type[i]] && c.mark[i] !== ng) { c.mark[i] = ng; nc.push(c); ni.push(i); }\n    }\n    for (let k = 0; k < ov.length; k += 2) if (ov[k].st[ov[k + 1]] > MAXS) ov[k].st[ov[k + 1]] = MAXS;\n    this.curC = nc; this.curI = ni; this.nextC = C; this.nextI = I; this.curGen = ng;\n    this.tick++; this.mods++;\n    if (rec) {\n      this.hist.push(rec); this.recCount += rec.c.length;\n      let drop = 0;\n      while (this.recCount > this.recMax && drop < this.hist.length - 1) this.recCount -= this.hist[drop++].c.length;\n      if (drop) this.hist.splice(0, drop);\n    }\n    return m;\n  }\n\n  prune() {\n    for (const [k, c] of this.chunks) if (c.isEmpty()) this.chunks.delete(k);\n    for (const c of this.chunks.values()) c.nb.fill(null);\n  }\n  toData(share) {\n    this.prune();\n    const chunks = [];\n    for (const c of this.chunks.values()) {\n      chunks.push(share ? { cx: c.cx, cy: c.cy, type: c.type, dir: c.dir, st: c.st } : { cx: c.cx, cy: c.cy, type: c.type.slice(), dir: c.dir.slice(), st: c.st.slice() });\n    }\n    return { chunks, tick: this.tick, rng: this.rng };\n  }\n  fromData(data) {\n    this.clear();\n    this.tick = data.tick || 0; this.rng = data.rng || 123456789;\n    for (const d of data.chunks) {\n      const c = this.getChunk(d.cx, d.cy, true);\n      c.type.set(d.type); c.dir.set(d.dir); c.st.set(d.st);\n      for (let i = 0; i < N; i++) {\n        if (isSrcT(c.type[i])) c.srcN++;\n        if (c.st[i] > MAXS) c.st[i] = MAXS;\n      }\n    }\n    this.srcDirty = true;\n    for (const c of this.chunks.values()) for (let i = 0; i < N; i++) this.touch(c, i);\n  }\n  cellCount() {\n    let n = 0;\n    for (const c of this.chunks.values()) for (let i = 0; i < N; i++) if (c.type[i] !== 0 || c.st[i] > 0) n++;\n    return n;\n  }\n}\nfunction isSrcT(t) { return t === 6 || t === 10; }\n\n";
+const ENGINE_SRC = "\nconst CS = 32, N = CS * CS;\nconst MAXS = 1e14, MAXSB = 100000000000000n;\nconst CLIM = 33554432;\nconst T = { EMPTY: 0, WIRE: 1, KILL: 2, CMP: 3, DUP: 4, WIRE2: 5, SRC: 6, DISP: 7, BTN: 8, RAND: 9, SWITCH: 10, SYM: 11, DIV: 12 };\n\nconst DIRECTIONAL = [0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1];\nconst VARIANT = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1];\n\nconst PUSH = new Uint8Array([0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1]);\nconst DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];\n\nif (typeof BigInt.prototype.toJSON !== 'function') BigInt.prototype.toJSON = function () { return this.toString(); };\nfunction normSt(v) {\n  if (typeof v === 'string') { try { v = BigInt(v); } catch (e) { return 0; } }\n  if (typeof v === 'bigint') return v < 0n ? 0 : v <= MAXSB ? Number(v) : v;\n  v = Math.floor(v);\n  if (!(v > 0)) return 0;\n  return v <= MAXS ? v : BigInt(Math.min(v, Number.MAX_VALUE));\n}\nfunction addSt(a, b) { return normSt(typeof a === 'bigint' || typeof b === 'bigint' ? BigInt(a) + BigInt(b) : a + b); }\nfunction stOf(c, i) { const v = c.st[i]; return v === Infinity ? c.bg.get(i) : v; }\nclass Chunk {\n  constructor(cx, cy) {\n    this.cx = cx; this.cy = cy;\n    this.type = new Uint8Array(N);\n    this.dir = new Uint8Array(N);\n    this.st = new Float64Array(N);\n    this.mark = new Uint32Array(N);\n    this.nb = new Array(9).fill(null);\n    this.srcN = 0; this.bg = null;\n    this.ver = 0; this.mv = -1; this.mc = 0; this.dg = 0; this.sh = null;\n  }\n  isEmpty() {\n    const t = this.type, s = this.st;\n    for (let i = 0; i < N; i++) if (t[i] !== 0 || s[i] !== 0) return false;\n    return true;\n  }\n}\n\nclass World {\n  constructor() {\n    this.chunks = new Map();\n    this.tick = 0; this.rng = 123456789;\n    this.clrC = []; this.clrI = [];\n    this.curC = []; this.curI = []; this.curGen = 1;\n    this.nextC = []; this.nextI = [];\n    this.srcC = []; this.srcI = []; this.srcDirty = false;\n    this.opC = []; this.opI = new Int32Array(4096); this.opD = new Float64Array(4096); this.opN = 0;\n    this.bigN = 0; this.noBig = false; this.ovf = false; this.bopC = []; this.bopI = []; this.bopV = []; this.bopN = 0;\n    this.track = null; this.dgen = 1; this.mods = 0; this.vc = 0;\n    this.recOn = true; this.recMax = 1500000; this.recCount = 0; this.hist = []; this.redoN = 0;\n  }\n  dropHist() { if (this.hist.length) { this.hist = []; this.recCount = 0; } this.redoN = 0; }\n\n  getChunk(cx, cy, create) {\n    if (cx < -CLIM || cx >= CLIM || cy < -CLIM || cy >= CLIM) return null;\n    const k = (cx + CLIM) * 67108864 + (cy + CLIM);\n    let c = this.chunks.get(k);\n    if (!c && create) { c = new Chunk(cx, cy); this.chunks.set(k, c); }\n    return c || null;\n  }\n  nbr(c, ox, oy, create) {\n    if (ox === 0 && oy === 0) return c;\n    const j = (oy + 1) * 3 + ox + 1;\n    let n = c.nb[j];\n    if (n) return n;\n    n = this.getChunk(c.cx + ox, c.cy + oy, create);\n    if (n) c.nb[j] = n;\n    return n;\n  }\n  typeAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.type[((y & 31) << 5) | (x & 31)] : 0; }\n  dirAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.dir[((y & 31) << 5) | (x & 31)] : 0; }\n  stAt(x, y) { const c = this.getChunk(x >> 5, y >> 5, false); return c ? c.st[((y & 31) << 5) | (x & 31)] : 0; }\n  valAt(x, y) {\n    const c = this.getChunk(x >> 5, y >> 5, false); if (!c) return 0;\n    const i = ((y & 31) << 5) | (x & 31), v = c.st[i];\n    return v === Infinity ? c.bg.get(i) : v;\n  }\n  putBig(c, i, b) {\n    if (b > MAXSB) {\n      if (c.st[i] !== Infinity) { this.bigN++; c.st[i] = Infinity; }\n      if (!c.bg) c.bg = new Map();\n      c.bg.set(i, b);\n    } else {\n      if (c.st[i] === Infinity) { this.bigN--; c.bg.delete(i); }\n      c.st[i] = Number(b);\n    }\n  }\n\n  touch(c, i) {\n    if (PUSH[c.type[i]] && c.st[i] > 0 && c.mark[i] !== this.curGen) {\n      c.mark[i] = this.curGen; this.curC.push(c); this.curI.push(i);\n    }\n  }\n  setType(x, y, t, d) {\n    this.dropHist();\n    const c = this.getChunk(x >> 5, y >> 5, t !== 0);\n    if (!c) return;\n    const i = ((y & 31) << 5) | (x & 31);\n    const old = c.type[i];\n    if (isSrcT(old)) c.srcN--;\n    if (isSrcT(t)) c.srcN++;\n    if (isSrcT(old) || isSrcT(t)) this.srcDirty = true;\n    c.type[i] = t; c.ver = ++this.vc; this.mods++;\n    c.dir[i] = DIRECTIONAL[t] ? (d & (VARIANT[t] ? 7 : 3)) : 0;\n    this.touch(c, i);\n  }\n  setStones(x, y, s) {\n    this.dropHist();\n    let big = null;\n    s = normSt(s);\n    if (typeof s === 'bigint') { big = s; s = 0; }\n    const c = this.getChunk(x >> 5, y >> 5, big !== null || s > 0);\n    if (!c) return;\n    const i = ((y & 31) << 5) | (x & 31);\n    if (big !== null) this.putBig(c, i, big);\n    else { if (c.st[i] === Infinity) { this.bigN--; c.bg.delete(i); } c.st[i] = s; }\n    c.ver = ++this.vc; this.mods++;\n    this.touch(c, i);\n  }\n  setCell(x, y, t, d, s) { this.setType(x, y, t, d); this.setStones(x, y, s); }\n\n  clear() {\n    this.dropHist();\n    this.chunks.clear(); this.tick = 0; this.mods++; this.bigN = 0;\n    this.curC = []; this.curI = []; this.curGen = 1; this.nextC = []; this.nextI = [];\n    this.srcC = []; this.srcI = []; this.srcDirty = false;\n  }\n\n  pushOp(c, i, v) {\n    const n = this.opN;\n    this.opC[n] = c; this.opI[n] = i; this.opD[n] = v; this.opN = n + 1;\n  }\n  addOp(c, i, dx, dy, v) {\n    let x = (i & 31) + dx, y = (i >> 5) + dy, t = c;\n    if (x < 0 || x > 31 || y < 0 || y > 31) {\n      t = this.nbr(c, x >> 5, y >> 5, true);\n      if (!t) return;\n      x &= 31; y &= 31;\n    }\n    const ti = (y << 5) | x;\n    if (t.type[ti] === 11) return;\n    this.pushOp(t, ti, v);\n  }\n  addBig(c, i, dx, dy, v) {\n    if (v === 0n) return;\n    let x = (i & 31) + dx, y = (i >> 5) + dy, t = c;\n    if (x < 0 || x > 31 || y < 0 || y > 31) {\n      t = this.nbr(c, x >> 5, y >> 5, true);\n      if (!t) return;\n      x &= 31; y &= 31;\n    }\n    const ti = (y << 5) | x;\n    if (t.type[ti] === 11) return;\n    const n = this.bopN;\n    this.bopC[n] = t; this.bopI[n] = ti; this.bopV[n] = v; this.bopN = n + 1;\n  }\n  pushBig(c, i, v) { const n = this.bopN; this.bopC[n] = c; this.bopI[n] = i; this.bopV[n] = v; this.bopN = n + 1; }\n  readBig(c, i, dx, dy) {\n    let x = (i & 31) + dx, y = (i >> 5) + dy, t = c;\n    if (x < 0 || x > 31 || y < 0 || y > 31) {\n      t = this.nbr(c, x >> 5, y >> 5, false);\n      if (!t) return 0;\n      x &= 31; y &= 31;\n    }\n    const ti = (y << 5) | x;\n    if (t.type[ti] === 11) return 0;\n    const v = t.st[ti];\n    return v === Infinity ? t.bg.get(ti) : v;\n  }\n  isqrtB(n) {\n    if (n < 2n) return n;\n    let x = 1n << BigInt((n.toString(2).length + 1) >> 1);\n    for (;;) { const y = (x + n / x) >> 1n; if (y >= x) return x; x = y; }\n  }\n  binomB(n) {\n    const u1 = (this.next() + 1) / 4294967297, u2 = this.next() / 4294967296;\n    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(6.283185307179586 * u2);\n    const zz = BigInt(Math.round(z * 1000000));\n    let k = n / 2n + zz * this.isqrtB(n) / 2000000n;\n    if (k < 0n) k = 0n; if (k > n) k = n;\n    return k;\n  }\n  bigCell(c, i, t, d) {\n    const b = c.bg.get(i);\n    switch (t) {\n      case 1: this.pushBig(c, i, -b); this.addBig(c, i, DX[d], DY[d], b); break;\n      case 8: this.pushBig(c, i, -b); this.addOp(c, i, DX[d], DY[d], 1); break;\n      case 9: { this.pushBig(c, i, -b); this.addBig(c, i, DX[d], DY[d], this.binomB(b)); break; }\n      case 2: this.pushBig(c, i, -b); break;\n      case 3: {\n        const dd = d & 3, flip = d >> 2;\n        const f = this.readBig(c, i, DX[dd], DY[dd]);\n        const o = ((b > f) !== (flip === 1)) ? (dd + 1) & 3 : (dd + 3) & 3;\n        this.pushBig(c, i, -b); this.addBig(c, i, DX[o], DY[o], b); break;\n      }\n      case 4: {\n        this.pushBig(c, i, -b);\n        const v = b - 1n, l = (d + 3) & 3, r = (d + 1) & 3;\n        this.addBig(c, i, DX[l], DY[l], v); this.addBig(c, i, DX[d], DY[d], v); this.addBig(c, i, DX[r], DY[r], v);\n        break;\n      }\n      case 5: this.pushBig(c, i, -b); this.addBig(c, i, DX[d] * 2, DY[d] * 2, b); break;\n      case 7: { const dd = d & 3; this.pushBig(c, i, -b); this.addBig(c, i, DX[dd], DY[dd], b); break; }\n      case 12: {\n        const dd = d & 3, f = this.readBig(c, i, DX[dd], DY[dd]);\n        const rr = (dd + 1 + (d >> 2) * 2) & 3, ll = (dd + 3 - (d >> 2) * 2) & 3;\n        this.pushBig(c, i, -b);\n        if (f > 0) {\n          const fb = typeof f === 'bigint' ? f : BigInt(f), q = b / fb, r = b - q * fb;\n          this.addBig(c, i, DX[rr], DY[rr], q); this.addBig(c, i, DX[ll], DY[ll], r);\n        } else this.addBig(c, i, DX[ll], DY[ll], b);\n        break;\n      }\n    }\n  }\n  applyBig(ng, nc, ni, vc) {\n    const oc = this.bopC, oi = this.bopI, ov = this.bopV, m = this.bopN;\n    for (let k = 0; k < m; k++) {\n      const c = oc[k], i = oi[k], v = ov[k];\n      const o = c.st[i];\n      this.putBig(c, i, (o === Infinity ? c.bg.get(i) : BigInt(o)) + v);\n      c.ver = vc;\n      if (v > 0n && PUSH[c.type[i]] && c.mark[i] !== ng) { c.mark[i] = ng; nc.push(c); ni.push(i); }\n    }\n    for (let k = 0; k < m; k++) { oc[k] = null; ov[k] = 0n; }\n    this.bopN = 0;\n  }\n  next() { let x = this.rng | 0; x ^= x << 13; x ^= x >>> 17; x ^= x << 5; this.rng = x; return x >>> 0; }\n  binom(n) {\n    if (n <= 64) { let k = 0; for (let j = 0; j < n; j++) if (this.next() >>> 31) k++; return k; }\n    const u1 = (this.next() + 1) / 4294967297, u2 = this.next() / 4294967296;\n    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(6.283185307179586 * u2);\n    return Math.max(0, Math.min(n, Math.round(n / 2 + z * Math.sqrt(n) / 2)));\n  }\n  readSt(c, i, dx, dy) {\n    let x = (i & 31) + dx, y = (i >> 5) + dy, t = c;\n    if (x < 0 || x > 31 || y < 0 || y > 31) {\n      t = this.nbr(c, x >> 5, y >> 5, false);\n      if (!t) return 0;\n      x &= 31; y &= 31;\n    }\n    const ti = (y << 5) | x;\n    return t.type[ti] === 11 ? 0 : t.st[ti];\n  }\n  rebuildSrc() {\n    this.srcC = []; this.srcI = [];\n    for (const c of this.chunks.values()) {\n      if (c.srcN <= 0) continue;\n      for (let i = 0; i < N; i++) if (isSrcT(c.type[i])) { this.srcC.push(c); this.srcI.push(i); }\n    }\n    this.srcDirty = false;\n  }\n\n  step() { this.redoN = 0; return this.stepCore(); }\n  undoTick() {\n    if (!this.hist.length) return false;\n    const r = this.hist.pop(); this.recCount -= r.c.length;\n    for (let k = r.c.length - 1; k >= 0; k--) { r.c[k].st[r.i[k]] = r.v[k]; r.c[k].ver = ++this.vc; }\n    this.rng = r.rng; this.tick--; this.mods++;\n    this.curC = r.actC; this.curI = r.actI; this.curGen++;\n    for (let k = 0; k < this.curC.length; k++) this.curC[k].mark[this.curI[k]] = this.curGen;\n    this.redoN++; return true;\n  }\n  redoTick() { if (!this.redoN) return false; const n = this.redoN; this.stepCore(); this.redoN = n - 1; return true; }\n  stepCore() {\n    if (this.srcDirty) this.rebuildSrc();\n    const C = this.curC, I = this.curI, n = C.length;\n    const rec = this.recOn && this.bigN === 0 ? { c: null, i: null, v: null, actC: C.slice(), actI: I.slice(), rng: this.rng } : null;\n    const need = n * 4 + this.srcC.length * 2 + 16;\n    if (this.opI.length < need) { const sz = Math.max(need, this.opI.length * 2); this.opI = new Int32Array(sz); this.opD = new Float64Array(sz); }\n    this.opN = 0;\n    for (let k = 0; k < n; k++) {\n      const c = C[k], i = I[k], s = c.st[i];\n      if (s <= 0) continue;\n      const t = c.type[i], d = c.dir[i];\n      if (s === Infinity) { this.bigCell(c, i, t, d); continue; }\n      switch (t) {\n        case 1:\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[d], DY[d], s); break;\n        case 8:\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[d], DY[d], 1); break;\n        case 9: {\n          this.pushOp(c, i, -s);\n          const k = this.binom(s);\n          if (k > 0) this.addOp(c, i, DX[d], DY[d], k);\n          break;\n        }\n        case 2:\n          this.pushOp(c, i, -s); break;\n        case 3: {\n          const dd = d & 3, flip = d >> 2;\n          const f = this.readSt(c, i, DX[dd], DY[dd]);\n          const o = ((s > f) !== (flip === 1)) ? (dd + 1) & 3 : (dd + 3) & 3;\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[o], DY[o], s); break;\n        }\n        case 4: {\n          this.pushOp(c, i, -s);\n          const v = s - 1;\n          if (v > 0) {\n            const l = (d + 3) & 3, r = (d + 1) & 3;\n            this.addOp(c, i, DX[l], DY[l], v);\n            this.addOp(c, i, DX[d], DY[d], v);\n            this.addOp(c, i, DX[r], DY[r], v);\n          }\n          break;\n        }\n        case 5:\n          this.pushOp(c, i, -s); this.addOp(c, i, DX[d] * 2, DY[d] * 2, s); break;\n        case 7: {\n          const dd = d & 3; this.pushOp(c, i, -s); this.addOp(c, i, DX[dd], DY[dd], s); break;\n        }\n        case 12: {\n          const dd = d & 3, f = this.readSt(c, i, DX[dd], DY[dd]);\n          const rr = (dd + 1 + (d >> 2) * 2) & 3, ll = (dd + 3 - (d >> 2) * 2) & 3;\n          this.pushOp(c, i, -s);\n          if (f > 0 && f < Infinity) {\n            const q = Math.floor(s / f), r = s - q * f;\n            if (q > 0) this.addOp(c, i, DX[rr], DY[rr], q);\n            if (r > 0) this.addOp(c, i, DX[ll], DY[ll], r);\n          } else this.addOp(c, i, DX[ll], DY[ll], s);\n          break;\n        }\n      }\n    }\n    const sc = this.srcC, si = this.srcI;\n    for (let k = 0; k < sc.length; k++) {\n      const q = sc[k], qi = si[k];\n      if (q.type[qi] === 6) { const s6 = q.st[qi]; if (s6 === Infinity) this.pushBig(q, qi, -q.bg.get(qi)); else if (s6 > 0) this.pushOp(q, qi, -s6); { const sd = q.dir[qi] & 3; this.addOp(q, qi, DX[sd], DY[sd], 1); } }\n      else if (q.dir[qi] & 4) { const d = q.dir[qi] & 3; this.addOp(q, qi, DX[d], DY[d], 1); }\n    }\n    const ng = this.curGen + 1, nc = this.nextC, ni = this.nextI;\n    nc.length = 0; ni.length = 0;\n    const oc = this.opC, oi = this.opI, od = this.opD, m = this.opN, trk = this.track, dg = this.dgen;\n    let rc = null, ri = null, rv = null;\n    if (rec) { rc = new Array(m); ri = oi.slice(0, m); rv = new Float64Array(m); rec.c = rc; rec.i = ri; rec.v = rv; }\n    const vc = ++this.vc, ov = [];\n    for (let k = 0; k < m; k++) {\n      const c = oc[k], i = oi[k], dv = od[k], st = c.st;\n      if (rec) { rc[k] = c; rv[k] = st[i]; }\n      if (trk && c.dg !== dg) { c.dg = dg; (c.sh || (c.sh = new Float64Array(N))).set(st); trk.push(c); }\n      const o = st[i], v = o + dv; st[i] = v; c.ver = vc;\n      if (v > MAXS) ov.push(c, i, o, dv);\n      if (dv > 0 && PUSH[c.type[i]] && c.mark[i] !== ng) { c.mark[i] = ng; nc.push(c); ni.push(i); }\n    }\n    if (ov.length) {\n      if (this.noBig) this.ovf = true;\n      else for (let k = 0; k < ov.length; k += 4) {\n        const c = ov[k], i = ov[k + 1], o = ov[k + 2];\n        if (o === Infinity) c.bg.set(i, c.bg.get(i) + BigInt(ov[k + 3]));\n        else if (c.st[i] !== Infinity) this.putBig(c, i, BigInt(c.st[i]));\n      }\n    }\n    if (this.bopN) this.applyBig(ng, nc, ni, vc);\n    this.curC = nc; this.curI = ni; this.nextC = C; this.nextI = I; this.curGen = ng;\n    this.tick++; this.mods++;\n    if (this.bigN > 0 && !this.noBig) { this.dropHist(); }\n    else if (rec) {\n      this.hist.push(rec); this.recCount += rec.c.length;\n      let drop = 0;\n      while (this.recCount > this.recMax && drop < this.hist.length - 1) this.recCount -= this.hist[drop++].c.length;\n      if (drop) this.hist.splice(0, drop);\n    }\n    return m;\n  }\n\n  prune() {\n    for (const [k, c] of this.chunks) if (c.isEmpty()) this.chunks.delete(k);\n    for (const c of this.chunks.values()) c.nb.fill(null);\n  }\n  toData(share) {\n    this.prune();\n    const chunks = [];\n    for (const c of this.chunks.values()) {\n      chunks.push(share ? { cx: c.cx, cy: c.cy, type: c.type, dir: c.dir, st: c.st, bg: c.bg && c.bg.size ? c.bg : null } : { cx: c.cx, cy: c.cy, type: c.type.slice(), dir: c.dir.slice(), st: c.st.slice(), bg: c.bg && c.bg.size ? new Map(c.bg) : null });\n    }\n    return { chunks, tick: this.tick, rng: this.rng };\n  }\n  fromData(data) {\n    this.clear();\n    this.tick = data.tick || 0; this.rng = data.rng || 123456789;\n    for (const d of data.chunks) {\n      const c = this.getChunk(d.cx, d.cy, true);\n      c.type.set(d.type); c.dir.set(d.dir); c.st.set(d.st);\n      for (let i = 0; i < N; i++) {\n        if (isSrcT(c.type[i])) c.srcN++;\n        const v = c.st[i];\n        if (v === Infinity) {\n          const b = d.bg && d.bg.get(i);\n          c.st[i] = 0;\n          if (b) this.putBig(c, i, b);\n        } else if (v > MAXS) { c.st[i] = 0; this.putBig(c, i, BigInt(v)); }\n      }\n    }\n    this.srcDirty = true;\n    for (const c of this.chunks.values()) for (let i = 0; i < N; i++) this.touch(c, i);\n  }\n  rebuildActive() {\n    this.curGen++; this.curC = []; this.curI = []; this.nextC = []; this.nextI = [];\n    for (const c of this.chunks.values()) for (let i = 0; i < N; i++) this.touch(c, i);\n  }\n  cellCount() {\n    let n = 0;\n    for (const c of this.chunks.values()) for (let i = 0; i < N; i++) if (c.type[i] !== 0 || c.st[i] > 0) n++;\n    return n;\n  }\n}\nfunction isSrcT(t) { return t === 6 || t === 10; }\n\n\n\nconst FLAT_MAX = 24e6;\nconst FPUSH = new Uint8Array(256);\nfor (let i = 0; i < PUSH.length; i++) FPUSH[i] = PUSH[i];\n\nconst DXs = [0, 1, 0, -1], DYs = [-1, 0, 1, 0];\nfunction fTg(NB, id, dx, dy) {\n  const i = id & 1023, x = (i & 31) + dx, y = (i >> 5) + dy;\n  if (((x | y) & -32) === 0) return (id & -1024) | (y << 5) | x;\n  return (NB[(id >> 10) * 9 + ((y >> 5) + 1) * 3 + (x >> 5) + 1] << 10) | ((y & 31) << 5) | (x & 31);\n}\n\nclass FlatSim {\n  static compile(world) {\n    const KEY = (cx, cy) => (cx + 33554432) * 67108864 + (cy + 33554432);\n    const real = [], map = new Map();\n    for (const c of world.chunks.values()) { map.set(KEY(c.cx, c.cy), real.length); real.push(c); }\n    if (!real.length) return null;\n    const cxs = real.map(c => c.cx), cys = real.map(c => c.cy);\n    for (let k = 0, n = real.length; k < n; k++) {\n      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {\n        const key = KEY(cxs[k] + dx, cys[k] + dy);\n        if (!map.has(key)) { map.set(key, cxs.length); cxs.push(cxs[k] + dx); cys.push(cys[k] + dy); }\n      }\n      if (cxs.length * 1024 > FLAT_MAX) return null;\n    }\n    const slots = cxs.length, total = slots * 1024, f = new FlatSim();\n    f.CX = Int32Array.from(cxs); f.CY = Int32Array.from(cys);\n    const NB = f.NB = new Int32Array(slots * 9).fill(-1);\n    for (let k = 0; k < slots; k++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {\n      const q = map.get(KEY(cxs[k] + dx, cys[k] + dy));\n      if (q !== undefined) NB[k * 9 + (dy + 1) * 3 + dx + 1] = q;\n    }\n    const buf = new ArrayBuffer(total * 16); f.F = new Float64Array(buf); f.U = new Uint32Array(buf);\n    const U = f.U, F = f.F;\n    for (let k = 0; k < real.length; k++) {\n      const c = real[k], base = k * 1024;\n      for (let i = 0; i < 1024; i++) { F[(base + i) << 1] = c.st[i]; U[((base + i) << 2) + 2] = c.type[i] | (c.dir[i] << 8); }\n    }\n    f.SH = new Float64Array(total); for (let id = 0; id < total; id++) f.SH[id] = F[id << 1];\n    f.win = new Int32Array(1 << 20); f.wn = 0; f.xs = new Int32Array(4096); f.xn = 0;\n    f.real = real.length; f.slots = slots;\n    const src = [], cur = [];\n    for (let id = 0, e = real.length * 1024; id < e; id++) {\n      const t = U[(id << 2) + 2] & 255;\n      if (t === 6 || t === 10) src.push(id);\n      if (FPUSH[t] && F[id << 1] > 0) cur.push(id);\n    }\n    f.src = Int32Array.from(src);\n    f.cur = Int32Array.from(cur); f.n = cur.length;\n    f.nxt = new Int32Array(Math.max(1024, cur.length * 2));\n    f.opId = new Int32Array(1024); f.opD = new Float64Array(1024);\n    f.gen = 1; f.tick = world.tick; f.rng = world.rng;\n    for (const id of cur) U[(id << 2) + 3] = f.gen;\n    f.worldChunks = real;\n    return f;\n  }\n\n  next() { let x = this.rng | 0; x ^= x << 13; x ^= x >>> 17; x ^= x << 5; this.rng = x; return x >>> 0; }\n  binom(n) {\n    if (n <= 64) { let k = 0; for (let j = 0; j < n; j++) if (this.next() >>> 31) k++; return k; }\n    const u1 = (this.next() + 1) / 4294967297, u2 = this.next() / 4294967296;\n    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(6.283185307179586 * u2);\n    return Math.max(0, Math.min(n, Math.round(n / 2 + z * Math.sqrt(n) / 2)));\n  }\n\n  step() {\n    const F = this.F, U = this.U, NB = this.NB, cur = this.cur, n = this.n, src = this.src;\n    const need = n * 4 + src.length * 2 + 16;\n    if (this.opId.length < need) { const sz = Math.max(need, this.opId.length * 2); this.opId = new Int32Array(sz); this.opD = new Float64Array(sz); }\n    const oi = this.opId, od = this.opD;\n    let m = 0;\n    this.addWin(cur, n); this.addWin(src, src.length);\n    for (let k = 0; k < n; k++) {\n      const id = cur[k], s = F[id << 1];\n      if (s <= 0) continue;\n      const meta = U[(id << 2) + 2], t = meta & 255, d = meta >>> 8;\n      switch (t) {\n        case 1: {\n          oi[m] = id; od[m++] = -s;\n          const g = fTg(NB, id, DXs[d], DYs[d]);\n          if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = s; }\n          break;\n        }\n        case 7: {\n          oi[m] = id; od[m++] = -s;\n          const g = fTg(NB, id, DXs[d & 3], DYs[d & 3]);\n          if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = s; }\n          break;\n        }\n        case 5: {\n          oi[m] = id; od[m++] = -s;\n          const g = fTg(NB, id, DXs[d] * 2, DYs[d] * 2);\n          if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = s; }\n          break;\n        }\n        case 2:\n          oi[m] = id; od[m++] = -s;\n          break;\n        case 8: {\n          oi[m] = id; od[m++] = -s;\n          const g = fTg(NB, id, DXs[d], DYs[d]);\n          if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = 1; }\n          break;\n        }\n        case 9: {\n          oi[m] = id; od[m++] = -s;\n          const q = this.binom(s);\n          if (q > 0) { const g = fTg(NB, id, DXs[d], DYs[d]); if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = q; } }\n          break;\n        }\n        case 3: {\n          const dd = d & 3, rg = fTg(NB, id, DXs[dd], DYs[dd]), f = (U[(rg << 2) + 2] & 255) === 11 ? 0 : F[rg << 1];\n          const o = ((s > f) !== ((d >> 2) === 1)) ? (dd + 1) & 3 : (dd + 3) & 3;\n          oi[m] = id; od[m++] = -s;\n          const g = fTg(NB, id, DXs[o], DYs[o]);\n          if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = s; }\n          break;\n        }\n        case 4: {\n          oi[m] = id; od[m++] = -s;\n          const v = s - 1;\n          if (v > 0) {\n            let g = fTg(NB, id, DXs[(d + 3) & 3], DYs[(d + 3) & 3]);\n            if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = v; }\n            g = fTg(NB, id, DXs[d], DYs[d]);\n            if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = v; }\n            g = fTg(NB, id, DXs[(d + 1) & 3], DYs[(d + 1) & 3]);\n            if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = v; }\n          }\n          break;\n        }\n        case 12: {\n          const dd = d & 3, rg = fTg(NB, id, DXs[dd], DYs[dd]), f = (U[(rg << 2) + 2] & 255) === 11 ? 0 : F[rg << 1];\n          const rr = (dd + 1 + (d >> 2) * 2) & 3, ll = (dd + 3 - (d >> 2) * 2) & 3;\n          oi[m] = id; od[m++] = -s;\n          if (f > 0) {\n            const q = Math.floor(s / f), r = s - q * f;\n            if (q > 0) { const g = fTg(NB, id, DXs[rr], DYs[rr]); if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = q; } }\n            if (r > 0) { const g = fTg(NB, id, DXs[ll], DYs[ll]); if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = r; } }\n          } else { const g = fTg(NB, id, DXs[ll], DYs[ll]); if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = s; } }\n          break;\n        }\n      }\n    }\n    for (let k = 0; k < src.length; k++) {\n      const id = src[k], meta = U[(id << 2) + 2];\n      if ((meta & 255) === 6) {\n        const s6 = F[id << 1];\n        if (s6 > 0) { oi[m] = id; od[m++] = -s6; }\n        const g = fTg(NB, id, DXs[(meta >>> 8) & 3], DYs[(meta >>> 8) & 3]);\n        if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = 1; }\n      } else if ((meta >>> 8) & 4) {\n        const g = fTg(NB, id, DXs[(meta >>> 8) & 3], DYs[(meta >>> 8) & 3]);\n        if ((U[(g << 2) + 2] & 255) !== 11) { oi[m] = g; od[m++] = 1; }\n      }\n    }\n    const ng = this.gen + 1;\n    if (this.nxt.length < m + 16) this.nxt = new Int32Array(Math.max(m + 16, this.nxt.length * 2));\n    const nxt = this.nxt;\n    let nn = 0, ov = null;\n    for (let k = 0; k < m; k++) {\n      const id = oi[k], dv = od[k], v = F[id << 1] + dv;\n      F[id << 1] = v;\n      if (v > MAXS) ov = true;\n      if (dv > 0) {\n        if (FPUSH[U[(id << 2) + 2] & 255] !== 0) { if (U[(id << 2) + 3] !== ng) { U[(id << 2) + 3] = ng; nxt[nn++] = id; } }\n        else { if (this.xn === this.xs.length) this.growX(); this.xs[this.xn++] = id; }\n      }\n    }\n    if (ov) this.ovf = true;\n    this.nxt = cur; this.cur = nxt; this.n = nn; this.gen = ng; this.tick++;\n    return true;\n  }\n\n  addWin(a, n) {\n    if (this.wn + n > this.win.length) { const w2 = new Int32Array(Math.max(this.win.length * 2, this.wn + n)); w2.set(this.win.subarray(0, this.wn)); this.win = w2; }\n    this.win.set(a.subarray(0, n), this.wn); this.wn += n;\n  }\n  growX() { const x = new Int32Array(this.xs.length * 2); x.set(this.xs); this.xs = x; }\n  emit(list, n, out) {\n    const F = this.F, SH = this.SH, CX = this.CX, CY = this.CY;\n    for (let k = 0; k < n; k++) {\n      const id = list[k], v = F[id << 1];\n      if (v === SH[id]) continue;\n      SH[id] = v;\n      if (out.n === out.cap) out.grow();\n      const q = out.n++, sl = id >> 10;\n      out.cx[q] = CX[sl]; out.cy[q] = CY[sl]; out.idx[q] = id & 1023; out.val[q] = v;\n    }\n  }\n  collect(out) {\n    this.emit(this.win, this.wn, out); this.emit(this.cur, this.n, out); this.emit(this.xs, this.xn, out);\n    this.wn = 0; this.xn = 0;\n    if (this.win.length > (1 << 24)) this.win = new Int32Array(1 << 20);\n  }\n\n  writeBack(world) {\n    const F = this.F, CX = this.CX, CY = this.CY;\n    for (let sl = 0; sl < this.slots; sl++) {\n      let c = sl < this.real ? this.worldChunks[sl] : null;\n      for (let i = 0; i < 1024; i++) {\n        const v = F[((sl << 10) + i) << 1];\n        if (v === 0 && !c) continue;\n        if (!c) { c = world.getChunk(CX[sl], CY[sl], true); if (!c) break; }\n        c.st[i] = v;\n      }\n    }\n    world.tick = this.tick; world.rng = this.rng; world.srcDirty = true;\n    world.rebuildActive();\n  }\n}\n\n";
 
 
-const APP_VERSION = 'Pebble Automaton 1.0.0', APP_BUILD = '2026-11-26';
+const APP_VERSION = 'Pebble Automaton 1.0.0', APP_BUILD = '2026-11-27';
 
 const ERRLOG = [];
 function noteError(msg, where) { ERRLOG.push({ t: new Date().toISOString(), msg: String(msg).slice(0, 400), where: where || '' }); if (ERRLOG.length > 5) ERRLOG.shift(); }
@@ -9956,7 +10395,7 @@ async function boot() {
     else {
       const gw = new World(); for (const b of q.p.solution) placeBlock(gw, b[0], b[1], b[2]);
       q.ghost = [];
-      for (const c of gw.chunks.values()) for (let i = 0; i < 1024; i++) if (c.type[i] || c.st[i]) q.ghost.push([c.cx * 32 + (i & 31), c.cy * 32 + (i >> 5), c.type[i], c.dir[i], c.st[i]]);
+      for (const c of gw.chunks.values()) for (let i = 0; i < 1024; i++) if (c.type[i] || c.st[i]) q.ghost.push([c.cx * 32 + (i & 31), c.cy * 32 + (i >> 5), c.type[i], c.dir[i], stOf(c, i)]);
     }
     pzSolveSync(); need();
   };
